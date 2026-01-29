@@ -23,7 +23,7 @@ const Footer = ({ selectedVideos, onVideosChange, videos }) => {
   const [time, setTime] = useState(() =>
     new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
   );
-  const [date, setDate] = useState(() => 
+  const [date, setDate] = useState(() =>
     new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }).toUpperCase()
   );
 
@@ -177,33 +177,33 @@ const Footer = ({ selectedVideos, onVideosChange, videos }) => {
                   )}
 
                   <span className="font-bold text-[11px] tracking-wider">
-                    {String(idx + 1).padStart(2, '0')}
+                    {vid.label === 'UPLOADED' ? 'UP' : String(idx + 1).padStart(2, '0')}
                   </span>
                 </button>
 
                 {/* TACTICAL TOOLTIP */}
-<div className="pointer-events-none absolute bottom-full mb-2 left-1/2 -translate-x-1/2
+                <div className="pointer-events-none absolute bottom-full mb-2 left-1/2 -translate-x-1/2
                 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-  <div className="px-2 py-1 bg-black/95 border border-emerald-500/30
+                  <div className="px-2 py-1 bg-black/95 border border-emerald-500/30
                   text-[10px] text-emerald-400 whitespace-nowrap
                   tracking-wider backdrop-blur-sm">
 
-    {/* REGION — SAME AS RIGHT PANEL */}
-    <div className="font-bold text-emerald-400">
-      {DRONE_REGION_MAP[vid.id] || 'UNKNOWN REGION'}
-    </div>
+                    {/* REGION — SAME AS RIGHT PANEL */}
+                    <div className="font-bold text-emerald-400">
+                      {DRONE_REGION_MAP[vid.id] || 'UNKNOWN REGION'}
+                    </div>
 
-    {/* DRONE LABEL — SECONDARY */}
-    <div className="mt-0.5 text-[9px] text-white/50 tracking-widest">
-      {vid.label}
-    </div>
-  </div>
+                    {/* DRONE LABEL — SECONDARY */}
+                    <div className="mt-0.5 text-[9px] text-white/50 tracking-widest">
+                      {vid.label}
+                    </div>
+                  </div>
 
-  {/* ARROW */}
-  <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-px">
-    <div className="border-4 border-transparent border-t-emerald-500/30" />
-  </div>
-</div>
+                  {/* ARROW */}
+                  <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-px">
+                    <div className="border-4 border-transparent border-t-emerald-500/30" />
+                  </div>
+                </div>
 
               </div>
             );

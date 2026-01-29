@@ -11,9 +11,6 @@ rtsp_links:
 - rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone10
 - rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone11
 - rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone12
+- /home/ubuntu/Desktop/iris_command/backend/data/uploads/drone_analysis_20260127_205516.mp4
 active_sources: []
-overlays:
-  bcpdrone9:
-    heatmap: true
-    trails: true
-    bboxes: true
+overlays: {}

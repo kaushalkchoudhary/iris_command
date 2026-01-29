@@ -13,25 +13,22 @@ const WEBRTC_BASE_URL = import.meta.env.DEV
 /* ============================
    DRONE FEEDS
 ============================ */
-const DRONE_FEEDS = [
-  { id: 'bcpdrone1', label: 'Drone 01', region: 'MG Road Junction', stream: 'processed_bcpdrone1' },
-  { id: 'bcpdrone2', label: 'Drone 02', region: 'Outer Ring Road', stream: 'processed_bcpdrone2' },
-  { id: 'bcpdrone3', label: 'Drone 03', region: 'Whitefield Main Road', stream: 'processed_bcpdrone3' },
-  { id: 'bcpdrone4', label: 'Drone 04', region: 'Silk Board Signal', stream: 'processed_bcpdrone4' },
-  { id: 'bcpdrone5', label: 'Drone 05', region: 'Marathahalli Bridge', stream: 'processed_bcpdrone5' },
-  { id: 'bcpdrone6', label: 'Drone 06', region: 'Electronic City Flyover', stream: 'processed_bcpdrone6' },
-  { id: 'bcpdrone7', label: 'Drone 07', region: 'Hebbal Flyover', stream: 'processed_bcpdrone7' },
-  { id: 'bcpdrone8', label: 'Drone 08', region: 'KR Puram Junction', stream: 'processed_bcpdrone8' },
-  { id: 'bcpdrone9', label: 'Drone 09', region: 'Bellandur Lake Road', stream: 'processed_bcpdrone9' },
-  { id: 'bcpdrone10', label: 'Drone 10', region: 'HSR Layout Sector 7', stream: 'processed_bcpdrone10' },
-  { id: 'bcpdrone11', label: 'Drone 11', region: 'Yelahanka New Town', stream: 'processed_bcpdrone11' },
-  { id: 'bcpdrone12', label: 'Drone 12', region: 'JP Nagar Phase 6', stream: 'processed_bcpdrone12' },
-];
+const DRONE_REGION_MAP = {
+  bcpdrone1: 'MG Road Junction',
+  bcpdrone2: 'Outer Ring Road',
+  bcpdrone3: 'Whitefield Main Road',
+  bcpdrone4: 'Silk Board Signal',
+  bcpdrone5: 'Marathahalli Bridge',
+  bcpdrone6: 'Electronic City Flyover',
+  bcpdrone7: 'Hebbal Flyover',
+  bcpdrone8: 'KR Puram Junction',
+  bcpdrone9: 'Bellandur Lake Road',
+  bcpdrone10: 'HSR Layout Sector 7',
+  bcpdrone11: 'Yelahanka New Town',
+  bcpdrone12: 'JP Nagar Phase 6',
+};
 
-/* ============================
-   RIGHT PANEL
-============================ */
-const RightPanel = () => {
+const RightPanel = ({ sources = [] }) => {
   const [selectedFeed, setSelectedFeed] = useState(null);
 
   return (
@@ -60,43 +57,50 @@ const RightPanel = () => {
 
         {/* FEED LIST */}
         <div className="flex-1 overflow-y-auto no-scrollbar">
-          {DRONE_FEEDS.map((feed, index) => (
-            <motion.div
-              key={feed.id}
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: index * 0.03 }}
-              onClick={() => setSelectedFeed(feed)}
-              className="
-                px-6 py-4
-                border-b border-white/5
-                cursor-pointer
-                hover:bg-white/[0.03]
-                transition-colors
-              "
-            >
-              <div className="flex items-center justify-between gap-4">
-                {/* REGION */}
-                <div className="flex-1">
-                  <div className="text-base font-black text-white uppercase tracking-wide">
-                    {feed.region}
+          {sources.map((feed, index) => {
+            const region = DRONE_REGION_MAP[feed.id] || (feed.label === 'UPLOADED' ? 'Local Video Feed' : 'Remote Stream');
+
+            // For modal compatibility
+            const feedWithRegion = { ...feed, region };
+
+            return (
+              <motion.div
+                key={feed.id}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: index * 0.03 }}
+                onClick={() => setSelectedFeed(feedWithRegion)}
+                className="
+                  px-6 py-4
+                  border-b border-white/5
+                  cursor-pointer
+                  hover:bg-white/[0.03]
+                  transition-colors
+                "
+              >
+                <div className="flex items-center justify-between gap-4">
+                  {/* REGION */}
+                  <div className="flex-1">
+                    <div className="text-base font-black text-white uppercase tracking-wide">
+                      {region}
+                    </div>
+
+                    {/* LIVE INDICATOR */}
+                    <div className="mt-2 flex items-center gap-2 text-[11px] text-emerald-400 uppercase tracking-widest font-bold">
+                      <span className="relative">
+                        <span className="absolute inset-0 rounded-full bg-emerald-400/30 animate-ping" />
+                        <span className="relative block w-2 h-2 rounded-full bg-emerald-400" />
+                      </span>
+                      LIVE FEED
+                    </div>
                   </div>
 
-                  {/* LIVE INDICATOR */}
-                  <div className="mt-2 flex items-center gap-2 text-[11px] text-emerald-400 uppercase tracking-widest font-bold">
-                    <span className="relative">
-                      <span className="absolute inset-0 rounded-full bg-emerald-400/30 animate-ping" />
-                      <span className="relative block w-2 h-2 rounded-full bg-emerald-400" />
-                    </span>
-                    LIVE FEED
-                  </div>
+                  {/* PASSIVE CARET */}
+                  <span className="text-white/20 text-sm">›</span>
                 </div>
-
-                {/* PASSIVE CARET */}
-                <span className="text-white/20 text-sm">›</span>
-              </div>
-            </motion.div>
-          ))}
+              </motion.div>
+            );
+          })}
         </div>
 
         {/* FOOTER */}

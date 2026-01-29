@@ -1,144 +1,153 @@
-import React, { useEffect, useState } from 'react';
-import { motion } from 'framer-motion';
+import React, { useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 
-/* ============================
-   UTIL: DAMPED VALUE UPDATE
-============================ */
-const damp = (current, target, factor = 0.08) =>
-  current + (target - current) * factor;
+const API_BASE_URL = import.meta.env.DEV ? '/api' : `http://${window.location.hostname}:9010`;
 
-/* ============================
-   LEFT TELEMETRY PANEL
-============================ */
-const LeftPanel = () => {
-  // Internal “true” load (simulates backend metric)
-  const [loadTarget, setLoadTarget] = useState(42);
+const LeftPanel = ({ onUploadSuccess }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [message, setMessage] = useState(null);
 
-  // Displayed values (smoothed)
-  const [systemLoad, setSystemLoad] = useState(42);
+  const handleFileChange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
 
-  /* --------------------------------
-     Simulate backend updates (slow)
-  ---------------------------------*/
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setLoadTarget((prev) => {
-        const drift = (Math.random() - 0.5) * 6;
-        return Math.min(85, Math.max(15, prev + drift));
-      });
-    }, 5000);
-    return () => clearInterval(interval);
-  }, []);
+    // Validate extension
+    const validExtensions = ['video/mp4', 'video/x-matroska', 'video/webm']; // rough check
+    const filename = file.name.toLowerCase();
+    if (!filename.endsWith('.mp4') && !filename.endsWith('.mkv')) {
+      setMessage({ type: 'error', text: 'Only MP4 or MKV files allowed' });
+      return;
+    }
 
-  /* --------------------------------
-     Smooth toward target (fast)
-  ---------------------------------*/
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setSystemLoad((v) => damp(v, loadTarget));
-    }, 80);
-    return () => clearInterval(interval);
-  }, [loadTarget]);
+    await uploadFile(file);
+  };
 
-  /* --------------------------------
-     Derived metrics
-  ---------------------------------*/
-  const throughput = Math.round(100 - systemLoad);
-  const loadRounded = Math.round(systemLoad);
+  const uploadFile = async (file) => {
+    setIsUploading(true);
+    setUploadProgress(0);
+    setMessage(null);
 
-  let state = 'NOMINAL';
-  let stateColor = 'text-emerald-400';
-  let borderColor = 'border-emerald-400/50';
+    try {
+      // Use raw body upload with filename in query param
+      const url = `${API_BASE_URL}/upload?filename=${encodeURIComponent(file.name)}`;
 
-  if (loadRounded > 70) {
-    state = 'DEGRADED';
-    stateColor = 'text-emerald-300';
-    borderColor = 'border-emerald-300/40';
-  }
-  if (loadRounded > 82) {
-    state = 'CONSTRAINED';
-    stateColor = 'text-emerald-200';
-    borderColor = 'border-emerald-200/40';
-  }
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', url, true);
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const percentComplete = (e.loaded / e.total) * 100;
+          setUploadProgress(percentComplete);
+        }
+      };
+
+      xhr.onload = function () {
+        if (xhr.status === 200) {
+          setMessage({ type: 'success', text: 'Upload successful' });
+          setUploadProgress(100);
+          if (onUploadSuccess) onUploadSuccess();
+          setTimeout(() => setMessage(null), 3000);
+        } else {
+          setMessage({ type: 'error', text: `Upload failed: ${xhr.responseText}` });
+        }
+        setIsUploading(false);
+      };
+
+      xhr.onerror = function () {
+        setMessage({ type: 'error', text: 'Connection error during upload' });
+        setIsUploading(false);
+      };
+
+      xhr.send(file);
+
+    } catch (e) {
+      console.error(e);
+      setMessage({ type: 'error', text: 'Upload error' });
+      setIsUploading(false);
+    }
+  };
 
   return (
-    <motion.div
-      initial={{ x: -40, opacity: 0 }}
-      animate={{ x: 0, opacity: 1 }}
-      transition={{ duration: 0.8, ease: 'easeOut' }}
-      className="
-        absolute left-6 top-1/2 -translate-y-1/2
-        flex flex-col gap-10
-        pointer-events-none z-40
-        font-mono
-      "
-    >
-      {/* THROUGHPUT */}
-      <div>
-        <div className="text-[10px] uppercase tracking-[0.35em] text-emerald-400/60 font-bold">
-          NETWORK THROUGHPUT
-        </div>
-
-        <div className="flex items-end gap-2 mt-1">
-          <span className="text-[96px] font-black text-white leading-none tracking-tighter">
-            {throughput}
-          </span>
-          <span className="mb-3 text-sm text-emerald-400/50 font-bold">
-            %
-          </span>
-        </div>
-      </div>
-
-      {/* SYSTEM LOAD */}
-      <div>
-        <div className="text-[10px] uppercase tracking-[0.35em] text-emerald-400/60 font-bold">
-          SYSTEM LOAD
-        </div>
-
-        <div className="flex items-end gap-2 mt-1">
-          <span
-            className={`text-[64px] font-black leading-none ${stateColor}`}
-          >
-            {loadRounded}
-          </span>
-          <span className="mb-2 text-sm text-emerald-400/40 font-bold">
-            %
-          </span>
-        </div>
-      </div>
-
-      {/* STATUS STRIP */}
+    <>
       <div
-        className={`
-          px-4 py-2 border-l-4
-          ${borderColor}
-          bg-black/40 backdrop-blur
-          self-start
-        `}
+        className={`fixed left-0 top-1/2 -translate-y-1/2 z-50 transition-all duration-300 ${isOpen ? 'translate-x-0' : '-translate-x-[calc(100%-20px)]'}`}
       >
-        <div
-          className={`text-[11px] font-black uppercase tracking-[0.3em] ${stateColor}`}
-        >
-          STATE: {state}
-        </div>
-      </div>
+        <div className="flex items-center">
+          {/* Panel Content */}
+          <div className="w-80 bg-black/80 backdrop-blur-xl border-r border-y border-emerald-500/30 rounded-r-xl p-6 shadow-2xl relative">
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="text-emerald-400 font-black tracking-wider text-sm flex items-center gap-2">
+                <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
+                UPLOAD FEED
+              </h2>
+              <button onClick={() => setIsOpen(false)} className="text-white/50 hover:text-white">✕</button>
+            </div>
 
-      {/* NODE METADATA */}
-      <div className="pt-4 border-t border-white/5 text-[10px] text-emerald-400/50 space-y-1">
-        <div className="flex gap-3">
-          <span className="text-emerald-400/70">NODE</span>
-          <span>IRIS-BLR-MAIN</span>
-        </div>
-        <div className="flex gap-3">
-          <span className="text-emerald-400/70">LAT</span>
-          <span>12.9716° N</span>
-        </div>
-        <div className="flex gap-3">
-          <span className="text-emerald-400/70">LNG</span>
-          <span>77.5946° E</span>
+            <div className="space-y-4">
+              <div className="border-2 border-dashed border-white/20 rounded-lg p-8 text-center hover:border-emerald-500/50 transition-colors group relative cursor-pointer">
+                <input
+                  type="file"
+                  accept=".mp4,.mkv"
+                  onChange={handleFileChange}
+                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                  disabled={isUploading}
+                />
+                <div className="text-4xl mb-2 group-hover:scale-110 transition-transform">📤</div>
+                <p className="text-xs text-emerald-500 font-bold uppercase tracking-wider mb-1">Upload Video</p>
+                <p className="text-[10px] text-gray-500">MP4 / MKV Format Only</p>
+              </div>
+
+              <AnimatePresence>
+                {isUploading && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="space-y-2 overflow-hidden"
+                  >
+                    <div className="flex justify-between text-[10px] uppercase font-bold text-gray-400">
+                      <span>Uploading...</span>
+                      <span>{Math.round(uploadProgress)}%</span>
+                    </div>
+                    <div className="h-1 bg-white/10 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-emerald-500 transition-all duration-300"
+                        style={{ width: `${uploadProgress}%` }}
+                      />
+                    </div>
+                  </motion.div>
+                )}
+
+                {message && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 10 }}
+                    className={`text-[10px] font-bold p-2 rounded border ${message.type === 'error'
+                        ? 'bg-red-500/10 border-red-500/20 text-red-400'
+                        : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
+                      }`}
+                  >
+                    {message.text}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          </div>
+
+          {/* Toggle Tab */}
+          <button
+            onClick={() => setIsOpen(!isOpen)}
+            className="bg-emerald-600 text-black font-black text-[10px] uppercase tracking-widest py-8 px-1 rounded-r-md hover:bg-emerald-500 transition-colors shadow-[0_0_15px_rgba(16,185,129,0.5)] [writing-mode:vertical-rl] flex items-center gap-2"
+          >
+            {isOpen ? 'CLOSE' : 'UPLOAD'}
+          </button>
         </div>
       </div>
-    </motion.div>
+    </>
   );
 };
 

@@ -10,6 +10,8 @@ import IRISLoader from './components/Dashboard/IRISLoader';
 import WelcomeScreen from './components/Dashboard/WelcomeScreen';
 import HLSVideo from './components/UI/HLSVideo';
 import WebRTCVideo from './components/UI/WebRTCVideo';
+import Login from './components/Login';
+import LeftPanel from './components/Dashboard/LeftPanel';
 
 // MediaMTX stream configuration
 // In development, Vite proxies /hls/* to MediaMTX :8888
@@ -195,10 +197,10 @@ const CameraAnalytics = ({ scale = 1, camIndex = 0, useCase, videoId }) => {
       </div>
 
       {/* Right-side Analytics */}
-<div
-  className="absolute right-8 top-[42%] -translate-y-1/2 flex flex-col items-end gap-6 pointer-events-none origin-right"
-  style={{ transform: `scale(${scale})` }}
->
+      <div
+        className="absolute right-8 top-[42%] -translate-y-1/2 flex flex-col items-end gap-6 pointer-events-none origin-right"
+        style={{ transform: `scale(${scale})` }}
+      >
 
 
         {/* Congestion Index */}
@@ -246,10 +248,10 @@ const CameraAnalytics = ({ scale = 1, camIndex = 0, useCase, videoId }) => {
       </div>
 
       {/* Status Label */}
-<div
-  className="absolute bottom-2 right-8 pointer-events-none origin-right z-10"
-  style={{ transform: `scale(${scale})` }}
->
+      <div
+        className="absolute bottom-2 right-8 pointer-events-none origin-right z-10"
+        style={{ transform: `scale(${scale})` }}
+      >
 
 
         <div className={`px-6 py-3 border-r-[8px] ${borderColor} bg-black/80 backdrop-blur-md transform skew-x-[-12deg] rounded-l-lg`}>
@@ -318,7 +320,7 @@ const VideoCell = ({
           });
         }
       })
-      .catch(() => {});
+      .catch(() => { });
   }, [video.stream, video.overlayKey]);
 
   const updateOverlay = (next) => {
@@ -329,7 +331,7 @@ const VideoCell = ({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(next),
-    }).catch(() => {});
+    }).catch(() => { });
   };
 
   const toggleOverlay = (key) => {
@@ -521,25 +523,22 @@ const VideoCell = ({
       <div className="no-drag absolute top-1 right-3 z-30 flex items-center gap-2 bg-black/60 border border-emerald-500/30 rounded-md px-2 py-1 backdrop-blur-sm">
         <button
           onClick={() => toggleOverlay('heatmap')}
-          className={`text-[10px] font-mono font-bold uppercase px-2 py-1 rounded transition-all ${
-            overlayState.heatmap ? 'bg-emerald-500 text-black shadow-[0_0_10px_rgba(16,185,129,0.5)]' : 'text-white/50 hover:text-emerald-400 hover:bg-emerald-500/10'
-          }`}
+          className={`text-[10px] font-mono font-bold uppercase px-2 py-1 rounded transition-all ${overlayState.heatmap ? 'bg-emerald-500 text-black shadow-[0_0_10px_rgba(16,185,129,0.5)]' : 'text-white/50 hover:text-emerald-400 hover:bg-emerald-500/10'
+            }`}
         >
           H
         </button>
         <button
           onClick={() => toggleOverlay('trails')}
-          className={`text-[10px] font-mono font-bold uppercase px-2 py-1 rounded transition-all ${
-            overlayState.trails ? 'bg-emerald-500 text-black shadow-[0_0_10px_rgba(16,185,129,0.5)]' : 'text-white/50 hover:text-emerald-400 hover:bg-emerald-500/10'
-          }`}
+          className={`text-[10px] font-mono font-bold uppercase px-2 py-1 rounded transition-all ${overlayState.trails ? 'bg-emerald-500 text-black shadow-[0_0_10px_rgba(16,185,129,0.5)]' : 'text-white/50 hover:text-emerald-400 hover:bg-emerald-500/10'
+            }`}
         >
           T
         </button>
         <button
           onClick={() => toggleOverlay('bboxes')}
-          className={`text-[10px] font-mono font-bold uppercase px-2 py-1 rounded transition-all ${
-            overlayState.bboxes ? 'bg-emerald-500 text-black shadow-[0_0_10px_rgba(16,185,129,0.5)]' : 'text-white/50 hover:text-emerald-400 hover:bg-emerald-500/10'
-          }`}
+          className={`text-[10px] font-mono font-bold uppercase px-2 py-1 rounded transition-all ${overlayState.bboxes ? 'bg-emerald-500 text-black shadow-[0_0_10px_rgba(16,185,129,0.5)]' : 'text-white/50 hover:text-emerald-400 hover:bg-emerald-500/10'
+            }`}
         >
           B
         </button>
@@ -625,23 +624,97 @@ const Dashboard = () => {
 
   const theme = themes[useCase] || themes.traffic;
 
-  // Video sources - WebRTC streams from MediaMTX (12 drones)
-  const allVideos = [
-    { id: 'bcpdrone1', type: 'webrtc', stream: 'bcpdrone1', processedStream: 'processed_bcpdrone1', overlayKey: 'bcpdrone1', droneIndex: 1, label: 'Drone 1' },
-    { id: 'bcpdrone2', type: 'webrtc', stream: 'bcpdrone2', processedStream: 'processed_bcpdrone2', overlayKey: 'bcpdrone2', droneIndex: 2, label: 'Drone 2' },
-    { id: 'bcpdrone3', type: 'webrtc', stream: 'bcpdrone3', processedStream: 'processed_bcpdrone3', overlayKey: 'bcpdrone3', droneIndex: 3, label: 'Drone 3' },
-    { id: 'bcpdrone4', type: 'webrtc', stream: 'bcpdrone4', processedStream: 'processed_bcpdrone4', overlayKey: 'bcpdrone4', droneIndex: 4, label: 'Drone 4' },
-    { id: 'bcpdrone5', type: 'webrtc', stream: 'bcpdrone5', processedStream: 'processed_bcpdrone5', overlayKey: 'bcpdrone5', droneIndex: 5, label: 'Drone 5' },
-    { id: 'bcpdrone6', type: 'webrtc', stream: 'bcpdrone6', processedStream: 'processed_bcpdrone6', overlayKey: 'bcpdrone6', droneIndex: 6, label: 'Drone 6' },
-    { id: 'bcpdrone7', type: 'webrtc', stream: 'bcpdrone7', processedStream: 'processed_bcpdrone7', overlayKey: 'bcpdrone7', droneIndex: 7, label: 'Drone 7' },
-    { id: 'bcpdrone8', type: 'webrtc', stream: 'bcpdrone8', processedStream: 'processed_bcpdrone8', overlayKey: 'bcpdrone8', droneIndex: 8, label: 'Drone 8' },
-    { id: 'bcpdrone9', type: 'webrtc', stream: 'bcpdrone9', processedStream: 'processed_bcpdrone9', overlayKey: 'bcpdrone9', droneIndex: 9, label: 'Drone 9' },
-    { id: 'bcpdrone10', type: 'webrtc', stream: 'bcpdrone10', processedStream: 'processed_bcpdrone10', overlayKey: 'bcpdrone10', droneIndex: 10, label: 'Drone 10' },
-    { id: 'bcpdrone11', type: 'webrtc', stream: 'bcpdrone11', processedStream: 'processed_bcpdrone11', overlayKey: 'bcpdrone11', droneIndex: 11, label: 'Drone 11' },
-    { id: 'bcpdrone12', type: 'webrtc', stream: 'bcpdrone12', processedStream: 'processed_bcpdrone12', overlayKey: 'bcpdrone12', droneIndex: 12, label: 'Drone 12' },
+  const STATIC_DRONES = [
+    { id: 'bcpdrone1', type: 'webrtc', stream: 'bcpdrone1', processedStream: 'processed_bcpdrone1', overlayKey: 'bcpdrone1', droneIndex: 1, label: 'DRONE 1' },
+    { id: 'bcpdrone2', type: 'webrtc', stream: 'bcpdrone2', processedStream: 'processed_bcpdrone2', overlayKey: 'bcpdrone2', droneIndex: 2, label: 'DRONE 2' },
+    { id: 'bcpdrone3', type: 'webrtc', stream: 'bcpdrone3', processedStream: 'processed_bcpdrone3', overlayKey: 'bcpdrone3', droneIndex: 3, label: 'DRONE 3' },
+    { id: 'bcpdrone4', type: 'webrtc', stream: 'bcpdrone4', processedStream: 'processed_bcpdrone4', overlayKey: 'bcpdrone4', droneIndex: 4, label: 'DRONE 4' },
+    { id: 'bcpdrone5', type: 'webrtc', stream: 'bcpdrone5', processedStream: 'processed_bcpdrone5', overlayKey: 'bcpdrone5', droneIndex: 5, label: 'DRONE 5' },
+    { id: 'bcpdrone6', type: 'webrtc', stream: 'bcpdrone6', processedStream: 'processed_bcpdrone6', overlayKey: 'bcpdrone6', droneIndex: 6, label: 'DRONE 6' },
+    { id: 'bcpdrone7', type: 'webrtc', stream: 'bcpdrone7', processedStream: 'processed_bcpdrone7', overlayKey: 'bcpdrone7', droneIndex: 7, label: 'DRONE 7' },
+    { id: 'bcpdrone8', type: 'webrtc', stream: 'bcpdrone8', processedStream: 'processed_bcpdrone8', overlayKey: 'bcpdrone8', droneIndex: 8, label: 'DRONE 8' },
+    { id: 'bcpdrone9', type: 'webrtc', stream: 'bcpdrone9', processedStream: 'processed_bcpdrone9', overlayKey: 'bcpdrone9', droneIndex: 9, label: 'DRONE 9' },
+    { id: 'bcpdrone10', type: 'webrtc', stream: 'bcpdrone10', processedStream: 'processed_bcpdrone10', overlayKey: 'bcpdrone10', droneIndex: 10, label: 'DRONE 10' },
+    { id: 'bcpdrone11', type: 'webrtc', stream: 'bcpdrone11', processedStream: 'processed_bcpdrone11', overlayKey: 'bcpdrone11', droneIndex: 11, label: 'DRONE 11' },
+    { id: 'bcpdrone12', type: 'webrtc', stream: 'bcpdrone12', processedStream: 'processed_bcpdrone12', overlayKey: 'bcpdrone12', droneIndex: 12, label: 'DRONE 12' },
   ];
 
+  // Video sources state
+  const [allVideos, setAllVideos] = useState(STATIC_DRONES);
+
+  const fetchSources = async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/sources`);
+      if (res.ok) {
+        const data = await res.json();
+        // data.sources is array of strings (urls/paths)
+        const sources = data.sources.map((src, idx) => {
+          // Heuristic to match existing drones or new uploads
+          const isDrone = src.includes('bcpdrone');
+          let id = `source_${idx + 1}`;
+          let label = `SOURCE ${idx + 1}`;
+          let overlayKey = null;
+
+          if (isDrone) {
+            // Extract number
+            const match = src.match(/bcpdrone(\d+)/);
+            if (match) {
+              const num = match[1];
+              id = `bcpdrone${num}`;
+              label = `DRONE ${num}`;
+              overlayKey = `bcpdrone${num}`;
+            }
+          } else {
+            // It's likely an upload
+            const parts = src.split(/[/\\]/);
+            const filename = parts[parts.length - 1];
+            id = filename.replace(/[^\w-]/g, '_'); // sanitize
+            label = `UPLOADED`;
+            // For uploads, the stream name is usually the filename (based on backend logic)
+            // overlayKey is usually same as stream name
+            overlayKey = filename;
+          }
+
+          return {
+            id,
+            type: 'webrtc',
+            stream: overlayKey, // backend uses name as stream name
+            processedStream: `processed_${overlayKey}`,
+            overlayKey,
+            droneIndex: idx + 1,
+            label,
+            src // keep original src for ref
+          };
+        });
+
+        // Merge sources with static drones, avoiding duplicates by ID
+        setAllVideos(prev => {
+          const combined = [...prev];
+          sources.forEach(s => {
+            if (!combined.some(v => v.id === s.id)) {
+              combined.push(s);
+            }
+          });
+          return combined;
+        });
+      }
+    } catch (e) {
+      console.error("Failed to fetch sources", e);
+    }
+  };
+
+  useEffect(() => {
+    fetchSources();
+  }, []);
+
   const [selectedVideos, setSelectedVideos] = useState([]);
+
+  // Auto-select first drone if none selected
+  useEffect(() => {
+    if (selectedVideos.length === 0 && allVideos.length > 0) {
+      setSelectedVideos([allVideos[0]]);
+    }
+  }, [allVideos, selectedVideos.length]);
 
   // Video layout state - position and size for each video
   const [videoLayouts, setVideoLayouts] = useState({});
@@ -821,6 +894,7 @@ const Dashboard = () => {
       <div className="flex-1 flex flex-col relative overflow-hidden">
         {/* Header */}
         <Header onReset={() => navigate('/')} useCase={useCase} />
+        <LeftPanel onUploadSuccess={fetchSources} />
 
         {/* Main Video Area - Free-form Layout */}
         <div ref={containerRef} className="flex-1 relative overflow-hidden">
@@ -881,13 +955,19 @@ const Dashboard = () => {
         />
       </div>
 
-      <RightPanel useCase={useCase} />
+      <RightPanel useCase={useCase} sources={allVideos} />
     </motion.div>
   );
 }
 
 const AppContents = () => {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
   const location = useLocation();
+
+  if (!isAuthenticated) {
+    return <Login onLogin={() => setIsAuthenticated(true)} />;
+  }
+
   return (
     <div className="relative w-screen h-screen bg-[#050a14] overflow-hidden selection:bg-emerald-500/30 font-mono flex">
       <AnimatePresence mode="wait">

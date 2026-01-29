@@ -813,6 +813,7 @@ fn process_video() -> Result<()> {
         "0.0.0.0:9010",
         overlays.clone(),
         rtsp_config.clone(),
+        out_dir.join("analytics.db"),
         source_manager.clone(),
         start_source_fn.clone(),
         metrics_map.clone(),

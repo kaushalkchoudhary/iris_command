@@ -4,10 +4,13 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use std::fs::File;
+use rusqlite::Connection;
 
 use crate::helpers::{
     load_rtsp_config, mask_rtsp_credentials, save_rtsp_config, source_display_name, OverlayConfig,
@@ -80,6 +83,12 @@ struct ToggleSourceRequest {
     index: usize,
     /// true to activate, false to deactivate
     active: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginRequest {
+    username: String,
+    password: String,
 }
 
 pub type OverlayMap = Arc<Mutex<HashMap<String, OverlayState>>>;
@@ -165,6 +174,7 @@ pub type StartSourceFn =
 pub struct ControlServerState {
     pub overlays: OverlayMap,
     pub config_path: PathBuf,
+    pub db_path: PathBuf,
     pub source_manager: SharedSourceManager,
     pub start_source_fn: Option<StartSourceFn>,
     pub metrics: MetricsMap,
@@ -176,6 +186,7 @@ pub fn start_control_server(
     addr: &str,
     overlays: OverlayMap,
     config_path: PathBuf,
+    db_path: PathBuf,
     source_manager: SharedSourceManager,
     start_source_fn: StartSourceFn,
     metrics: MetricsMap,
@@ -184,6 +195,7 @@ pub fn start_control_server(
     let state = Arc::new(Mutex::new(ControlServerState {
         overlays,
         config_path,
+        db_path,
         source_manager,
         start_source_fn: Some(start_source_fn),
         metrics,
@@ -238,6 +250,72 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
         }
     }
 
+    // Special handling for /api/upload to stream the body
+    if method == "POST" && path.starts_with("/api/upload") {
+        let query_part = path.split('?').nth(1).unwrap_or("");
+        let mut filename = "upload.mp4".to_string();
+        for pair in query_part.split('&') {
+            if let Some(rest) = pair.strip_prefix("filename=") {
+                filename = url_decode(rest);
+            }
+        }
+
+        // Validate extension
+        if !filename.ends_with(".mp4") && !filename.ends_with(".mkv") {
+             return respond(stream, 400, "text/plain", "Only .mp4 and .mkv allowed");
+        }
+
+        let ctrl_state = state.lock().unwrap();
+        let config_path = ctrl_state.config_path.clone();
+        drop(ctrl_state);
+
+        // Ensure upload dir exists
+        let upload_dir = config_path.parent().unwrap().join("uploads");
+        std::fs::create_dir_all(&upload_dir).unwrap_or(());
+        let target_path = upload_dir.join(&filename);
+
+        info!("Receiving upload: {} -> {}", filename, target_path.display());
+        let mut file = match File::create(&target_path) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("Failed to create upload file: {}", e);
+                return respond(stream, 500, "text/plain", "File creation failed");
+            }
+        };
+
+        // Write the part of body already read in header buffer
+        if header_end + 4 < data.len() {
+             file.write_all(&data[header_end + 4..])?;
+        }
+        let mut bytes_written = (data.len() - (header_end + 4)) as usize;
+
+        // Stream the rest
+        while bytes_written < content_length {
+            let n = stream.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n])?;
+            bytes_written += n;
+        }
+        info!("Upload complete: {} bytes", bytes_written);
+
+        // Add to RTSP config if not present
+        if let Ok(mut config) = load_rtsp_config(&config_path) {
+            let full_path = target_path.to_string_lossy().to_string();
+            if !config.rtsp_links.contains(&full_path) {
+                config.rtsp_links.push(full_path);
+                let _ = save_rtsp_config(&config_path, &config);
+            }
+        }
+
+         let payload = serde_json::json!({
+             "success": true,
+             "filename": filename
+         });
+         return respond(stream, 200, "application/json", &payload.to_string());
+    }
+
     let mut body = data[header_end + 4..].to_vec();
     while body.len() < content_length {
         let n = stream.read(&mut buf)?;
@@ -252,6 +330,7 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
     let ctrl_state = state.lock().unwrap();
     let overlays = ctrl_state.overlays.clone();
     let config_path = ctrl_state.config_path.clone();
+    let db_path = ctrl_state.db_path.clone();
     let source_manager = ctrl_state.source_manager.clone();
     let start_source_fn = ctrl_state.start_source_fn.clone();
     let metrics_map = ctrl_state.metrics.clone();
@@ -365,6 +444,22 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
             active_sources: running_indexes,
         };
         let payload = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+        return respond(stream, 200, "application/json", &payload);
+    }
+
+    // GET /api/sources - get all defined sources
+    if method == "GET" && path == "/api/sources" {
+        let config = match load_rtsp_config(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to load config: {}", e);
+                return respond(stream, 500, "text/plain", "Failed to load config");
+            }
+        };
+        let payload = serde_json::to_string(&serde_json::json!({
+            "sources": config.rtsp_links
+        }))
+        .unwrap_or_else(|_| "{}".to_string());
         return respond(stream, 200, "application/json", &payload);
     }
 
@@ -669,6 +764,58 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
         return respond(stream, 200, "application/json", &payload);
     }
 
+    // POST /api/login
+    if method == "POST" && path == "/api/login" {
+        let req: LoginRequest = match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(_) => {
+                return respond(stream, 400, "text/plain", "Invalid JSON");
+            }
+        };
+
+        let conn = match Connection::open(&db_path) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to open DB for login: {}", e);
+                return respond(stream, 500, "text/plain", "Internal Server Error");
+            }
+        };
+
+        let mut stmt = match conn.prepare("SELECT password_hash FROM users WHERE username = ?1") {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Failed to prepare login statement: {}", e);
+                return respond(stream, 500, "text/plain", "Internal Server Error");
+            }
+        };
+
+        let mut rows = match stmt.query([&req.username]) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Failed to execute login query: {}", e);
+                return respond(stream, 500, "text/plain", "Internal Server Error");
+            }
+        };
+
+        if let Ok(Some(row)) = rows.next() {
+            let password_hash: String = row.get(0).unwrap_or_default();
+            // In a real app, verify hash. Here we just compare plain text as per instructions/current setup
+            if password_hash == req.password {
+                let payload = serde_json::json!({
+                    "success": true,
+                    "token": "dummy-token-123" 
+                });
+                return respond(stream, 200, "application/json", &payload.to_string());
+            }
+        }
+
+        let payload = serde_json::json!({
+            "success": false,
+            "error": "Invalid credentials"
+        });
+        return respond(stream, 401, "application/json", &payload.to_string());
+    }
+
     debug!("Control API: 404 for {} {}", method, path);
     respond(stream, 404, "text/plain", "Not Found")
 }
@@ -710,4 +857,23 @@ fn respond(
     );
     stream.write_all(response.as_bytes())?;
     Ok(())
+}
+
+fn url_decode(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            if let (Some(h1), Some(h2)) = (chars.next(), chars.next()) {
+                if let Ok(byte) = u8::from_str_radix(&format!("{}{}", h1, h2), 16) {
+                    out.push(byte as char);
+                }
+            }
+        } else if c == '+' {
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }

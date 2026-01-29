@@ -36,3 +36,11 @@ CREATE INDEX IF NOT EXISTS idx_minute_metrics_session_frame
 
 CREATE INDEX IF NOT EXISTS idx_minute_metrics_session_ts
   ON minute_frame_agg_metrics(session_id, ts_ms);
+
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL
+);
+
+INSERT OR IGNORE INTO users (username, password_hash) VALUES ('admin', 'admin123');
