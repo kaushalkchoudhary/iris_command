@@ -140,7 +140,8 @@ fn process_source(
     metrics_map: MetricsMap,
     show_ui: bool,
     stop_signal: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-) -> Result<()> {
+    skip_mediamtx: bool,
+) -> Result<String> {
     let source_label = source_display_name(&source);
     info!("[{}] === Starting source processing ===", source_label);
 
@@ -290,6 +291,7 @@ fn process_source(
         opts.output,
         inference_device.clone(),
         opts.stride,
+        skip_mediamtx,
     )?;
     info!("[{}] Video source connected successfully", source_label);
     info!("[{}] Video properties: {}x{} @ {:.1} FPS", source_label, state.w, state.h, state.fps);
@@ -303,7 +305,7 @@ fn process_source(
     }
 
     info!("[{}] Starting capture thread (buffer size: {} frames)...", source_label, opts.io_buffer);
-    let mut capture = Some(start_capture_thread(cap, state.stride, opts.io_buffer));
+    let mut capture = Some(start_capture_thread(cap, state.stride, opts.io_buffer, is_rtsp));
     info!("[{}] Capture thread started", source_label);
 
     if show_ui {
@@ -624,8 +626,9 @@ fn process_source(
     }
 
     info!("[{}] === Source processing complete ===", source_label);
-    Ok(())
+    Ok(state.out_path.to_string_lossy().to_string())
 }
+
 
 // full pipeline
 fn process_video() -> Result<()> {
@@ -801,12 +804,62 @@ fn process_video() -> Result<()> {
                 metrics,
                 false,
                 Some(stop_signal),
+                false,
             ) {
                 error!("Source {} processor error: {}", index, e);
             }
             info!("Processor for source {} finished", index);
         })
     });
+
+    // Create upload-only callback (skip MediaMTX, return output path)
+    let opts_for_upload = opts.clone();
+    let out_dir_for_upload = out_dir.clone();
+    let data_dir_for_upload = data_dir.clone();
+    let device_for_upload = inference_device.clone();
+    let overlays_for_upload = overlays.clone();
+    let metrics_for_upload = metrics_map.clone();
+
+    let start_upload_fn: control::StartUploadFn = std::sync::Arc::new(move |url: String, stop_signal: std::sync::Arc<std::sync::atomic::AtomicBool>| {
+        let opts = opts_for_upload.clone();
+        let out_dir = out_dir_for_upload.clone();
+        let data_dir = data_dir_for_upload.clone();
+        let device = device_for_upload.clone();
+        let overlays = overlays_for_upload.clone();
+        let metrics = metrics_for_upload.clone();
+
+        thread::spawn(move || {
+            info!("Starting upload processor for {}", source_display_name(&url));
+            match process_source(
+                url.clone(),
+                opts,
+                &out_dir,
+                &data_dir,
+                device,
+                overlays,
+                metrics,
+                false,
+                Some(stop_signal),
+                true, // skip_mediamtx
+            ) {
+                Ok(out_path) => {
+                    info!("Upload processor finished: {}", out_path);
+                    // Return just the filename, not the full path
+                    let filename = std::path::Path::new(&out_path)
+                        .file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                        .unwrap_or(out_path);
+                    Some(filename)
+                }
+                Err(e) => {
+                    error!("Upload processor error: {}", e);
+                    None
+                }
+            }
+        })
+    });
+
+    let jobs: control::SharedJobMap = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
 
     info!("Starting control server on 0.0.0.0:9010...");
     let _control_server = control::start_control_server(
@@ -816,7 +869,9 @@ fn process_video() -> Result<()> {
         out_dir.join("analytics.db"),
         source_manager.clone(),
         start_source_fn.clone(),
+        start_upload_fn,
         metrics_map.clone(),
+        jobs,
     );
     info!("Control server started");
 

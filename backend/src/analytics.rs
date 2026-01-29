@@ -136,7 +136,7 @@ pub fn update_heatmap(h: &mut Mat, tracks: &HashMap<i64, Track>) -> Result<()> {
                 h,
                 Point::new(x as i32, y as i32),
                 HEATMAP_RADIUS,
-                Scalar::all(0.4), // 🔑 small injection
+                Scalar::all(1.5),
                 -1,
                 imgproc::LINE_AA,
                 0,
@@ -145,7 +145,7 @@ pub fn update_heatmap(h: &mut Mat, tracks: &HashMap<i64, Track>) -> Result<()> {
     }
 
     let mut clamped = Mat::default();
-    core::min(h, &Scalar::all(60.0), &mut clamped)?;
+    core::min(h, &Scalar::all(80.0), &mut clamped)?;
     clamped.copy_to(h)?;
     Ok(())
 }
@@ -155,7 +155,7 @@ pub fn overlay_heatmap(h: &Mat, frame: &mut Mat) -> Result<()> {
     imgproc::gaussian_blur(
         h,
         &mut blur,
-        Size::new(31, 31),
+        Size::new(51, 51),
         0.0,
         0.0,
         core::BORDER_DEFAULT,
@@ -163,18 +163,27 @@ pub fn overlay_heatmap(h: &Mat, frame: &mut Mat) -> Result<()> {
 
     let mut max_val = 0.0;
     core::min_max_loc(&blur, None, Some(&mut max_val), None, None, &core::no_array())?;
-    if max_val < 1.5 {
+    if max_val < 0.5 {
         return Ok(());
     }
 
     let mut norm = Mat::default();
-    core::convert_scale_abs(&blur, &mut norm, 200.0 / max_val, 0.0)?;
+    core::convert_scale_abs(&blur, &mut norm, 255.0 / max_val, 0.0)?;
 
     let mut jet = Mat::default();
     imgproc::apply_color_map(&norm, &mut jet, imgproc::COLORMAP_JET)?;
 
-    let mut blended = Mat::default();
-    core::add_weighted(frame, 0.65, &jet, 0.35, 0.0, &mut blended, -1)?;
+    // Mask out near-zero areas so background doesn't tint blue
+    let mut gray_norm = Mat::default();
+    imgproc::cvt_color(&jet, &mut gray_norm, imgproc::COLOR_BGR2GRAY, 0)?;
+    let mut mask = Mat::default();
+    imgproc::threshold(&norm, &mut mask, 15.0, 255.0, imgproc::THRESH_BINARY)?;
+
+    // Only blend where heatmap has signal
+    let mut blended = frame.clone();
+    let mut heat_roi = Mat::default();
+    core::add_weighted(frame, 0.55, &jet, 0.45, 0.0, &mut heat_roi, -1)?;
+    heat_roi.copy_to_masked(&mut blended, &mask)?;
     blended.copy_to(frame)?;
 
     Ok(())
@@ -190,25 +199,35 @@ pub fn draw_trails(frame: &mut Mat, tracks: &HashMap<i64, Track>) -> Result<()> 
             continue;
         }
 
-        // Only last N points → ephemeral
-        let start = n.saturating_sub(12);
+        let start = n.saturating_sub(30);
         let slice = &t.trail[start..];
+        let seg_count = slice.len() - 1;
+        if seg_count == 0 {
+            continue;
+        }
 
         for (i, w) in slice.windows(2).enumerate() {
-            let alpha = i as f64 / slice.len() as f64;
+            // i=0 is the oldest (tail tip), i=seg_count-1 is newest (head)
+            let t_ratio = i as f64 / seg_count as f64; // 0.0 → tail, 1.0 → head
+
+            // Fade: tail is dim, head is bright
+            let alpha = (t_ratio * t_ratio).max(0.05); // quadratic fade-in
             let color = Scalar::new(
-                50.0,
-                50.0,
-                255.0 * alpha,
+                180.0 * alpha,      // blue channel grows
+                80.0 * alpha,       // green stays subtle
+                255.0 * alpha,      // red channel brightest
                 0.0,
             );
+
+            // Taper: 1px at tail tip, up to 3px at head
+            let thickness = (1.0 + t_ratio * 2.0).round() as i32;
 
             imgproc::line(
                 frame,
                 Point::new(w[0].0 as i32, w[0].1 as i32),
                 Point::new(w[1].0 as i32, w[1].1 as i32),
                 color,
-                2,
+                thickness,
                 imgproc::LINE_AA,
                 0,
             )?;
@@ -230,21 +249,40 @@ pub fn draw_detections(frame: &mut Mat, dets: &[Detection]) -> Result<()> {
         );
 
         let col = class_color(d.class_id);
-        imgproc::rectangle(frame, r, col, 2, imgproc::LINE_AA, 0)?;
+        imgproc::rectangle(frame, r, col, 1, imgproc::LINE_AA, 0)?;
 
         let label = match d.track_id {
-            Some(id) => format!("#{id} {} {}", class_name(d.class_id), d.speed.as_str()),
-            None => format!("{} {}", class_name(d.class_id), d.speed.as_str()),
+            Some(id) => format!("#{id} {}", class_name(d.class_id)),
+            None => class_name(d.class_id).to_string(),
         };
 
+        // Small label background for readability
+        let label_scale = 0.35;
+        let label_thickness = 1;
+        let text_size = imgproc::get_text_size(
+            &label,
+            imgproc::FONT_HERSHEY_SIMPLEX,
+            label_scale,
+            label_thickness,
+            &mut 0,
+        )?;
+        let label_y = (r.y - 4).max(text_size.height + 2);
+        imgproc::rectangle(
+            frame,
+            Rect::new(r.x, label_y - text_size.height - 2, text_size.width + 4, text_size.height + 4),
+            Scalar::new(0.0, 0.0, 0.0, 0.0),
+            -1,
+            imgproc::LINE_4,
+            0,
+        )?;
         imgproc::put_text(
             frame,
             &label,
-            Point::new(r.x, (r.y - 6).max(0)),
+            Point::new(r.x + 2, label_y),
             imgproc::FONT_HERSHEY_SIMPLEX,
-            0.55,
+            label_scale,
             col,
-            2,
+            label_thickness,
             imgproc::LINE_AA,
             false,
         )?;

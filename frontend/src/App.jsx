@@ -607,6 +607,7 @@ const VideoCell = ({
           <span className="text-emerald-400 font-mono text-xs font-bold">{zoom.toFixed(1)}x ZOOM</span>
         </div>
       )}
+
     </div>
   );
 };
@@ -647,17 +648,17 @@ const Dashboard = () => {
       const res = await fetch(`${API_BASE_URL}/sources`);
       if (res.ok) {
         const data = await res.json();
-        // data.sources is array of strings (urls/paths)
-        const sources = data.sources.map((src, idx) => {
-          // Heuristic to match existing drones or new uploads
-          const isDrone = src.includes('bcpdrone');
-          let id = `source_${idx + 1}`;
-          let label = `SOURCE ${idx + 1}`;
-          let overlayKey = null;
+        const sources = data.sources.map((srcObj) => {
+          const url = srcObj.url || '';
+          const name = srcObj.name || '';
+          const isDrone = url.includes('bcpdrone') || name.includes('bcpdrone');
+
+          let id = name;
+          let label = 'SOURCE';
+          let overlayKey = name;
 
           if (isDrone) {
-            // Extract number
-            const match = src.match(/bcpdrone(\d+)/);
+            const match = name.match(/bcpdrone(\d+)/) || url.match(/bcpdrone(\d+)/);
             if (match) {
               const num = match[1];
               id = `bcpdrone${num}`;
@@ -665,31 +666,26 @@ const Dashboard = () => {
               overlayKey = `bcpdrone${num}`;
             }
           } else {
-            // It's likely an upload
-            const parts = src.split(/[/\\]/);
-            const filename = parts[parts.length - 1];
-            id = filename.replace(/[^\w-]/g, '_'); // sanitize
+            const fileStem = name.split('.')[0];
+            id = fileStem.replace(/[^\w-]/g, '_');
             label = `UPLOADED`;
-            // For uploads, the stream name is usually the filename (based on backend logic)
-            // overlayKey is usually same as stream name
-            overlayKey = filename;
+            overlayKey = fileStem;
           }
 
           return {
             id,
             type: 'webrtc',
-            stream: overlayKey, // backend uses name as stream name
+            stream: overlayKey,
             processedStream: `processed_${overlayKey}`,
             overlayKey,
-            droneIndex: idx + 1,
+            droneIndex: srcObj.index,
             label,
-            src // keep original src for ref
+            src: url
           };
         });
 
-        // Merge sources with static drones, avoiding duplicates by ID
         setAllVideos(prev => {
-          const combined = [...prev];
+          const combined = [...STATIC_DRONES];
           sources.forEach(s => {
             if (!combined.some(v => v.id === s.id)) {
               combined.push(s);
@@ -708,13 +704,20 @@ const Dashboard = () => {
   }, []);
 
   const [selectedVideos, setSelectedVideos] = useState([]);
+  const [initialLoadDone, setInitialLoadDone] = useState(false);
 
-  // Auto-select first drone if none selected
+  // Auto-select first drone if none selected AND trigger backend processing
   useEffect(() => {
-    if (selectedVideos.length === 0 && allVideos.length > 0) {
-      setSelectedVideos([allVideos[0]]);
+    if (!initialLoadDone && selectedVideos.length === 0 && allVideos.length > 0) {
+      const firstVideo = allVideos[0];
+      setSelectedVideos([firstVideo]);
+      // Start processing for the initially selected drone
+      if (firstVideo.droneIndex) {
+        startDroneProcessing(firstVideo.droneIndex);
+      }
+      setInitialLoadDone(true);
     }
-  }, [allVideos, selectedVideos.length]);
+  }, [allVideos, selectedVideos.length, initialLoadDone]);
 
   // Video layout state - position and size for each video
   const [videoLayouts, setVideoLayouts] = useState({});
@@ -894,7 +897,7 @@ const Dashboard = () => {
       <div className="flex-1 flex flex-col relative overflow-hidden">
         {/* Header */}
         <Header onReset={() => navigate('/')} useCase={useCase} />
-        <LeftPanel onUploadSuccess={fetchSources} />
+        <LeftPanel />
 
         {/* Main Video Area - Free-form Layout */}
         <div ref={containerRef} className="flex-1 relative overflow-hidden">
@@ -952,6 +955,7 @@ const Dashboard = () => {
           selectedVideos={selectedVideos}
           onVideosChange={handleVideosChange}
           videos={allVideos}
+          onRefresh={fetchSources}
         />
       </div>
 

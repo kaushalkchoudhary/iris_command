@@ -1,7 +1,7 @@
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{Read, Write, BufWriter};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 
@@ -93,6 +93,18 @@ struct LoginRequest {
 
 pub type OverlayMap = Arc<Mutex<HashMap<String, OverlayState>>>;
 
+/// Upload job status tracking
+#[derive(Debug, Clone, Serialize)]
+pub struct UploadJob {
+    pub id: String,
+    pub filename: String,
+    pub status: String,        // "processing", "done", "error"
+    pub output_file: Option<String>,
+    pub error: Option<String>,
+}
+
+pub type SharedJobMap = Arc<Mutex<HashMap<String, UploadJob>>>;
+
 /// Real-time metrics for a source (updated by processing threads)
 #[derive(Debug, Clone, Copy, Serialize, Default)]
 pub struct SourceMetrics {
@@ -170,6 +182,10 @@ pub type SharedSourceManager = Arc<Mutex<SourceManager>>;
 pub type StartSourceFn =
     Arc<dyn Fn(usize, String, Arc<AtomicBool>) -> JoinHandle<()> + Send + Sync>;
 
+/// Callback type for starting an upload-only processor (no MediaMTX, returns output path)
+pub type StartUploadFn =
+    Arc<dyn Fn(String, Arc<AtomicBool>) -> JoinHandle<Option<String>> + Send + Sync>;
+
 /// Shared state for the control server including config path for persistence
 pub struct ControlServerState {
     pub overlays: OverlayMap,
@@ -177,7 +193,9 @@ pub struct ControlServerState {
     pub db_path: PathBuf,
     pub source_manager: SharedSourceManager,
     pub start_source_fn: Option<StartSourceFn>,
+    pub start_upload_fn: Option<StartUploadFn>,
     pub metrics: MetricsMap,
+    pub jobs: SharedJobMap,
 }
 
 pub type SharedControlState = Arc<Mutex<ControlServerState>>;
@@ -189,7 +207,9 @@ pub fn start_control_server(
     db_path: PathBuf,
     source_manager: SharedSourceManager,
     start_source_fn: StartSourceFn,
+    start_upload_fn: StartUploadFn,
     metrics: MetricsMap,
+    jobs: SharedJobMap,
 ) -> thread::JoinHandle<()> {
     let addr = addr.to_string();
     let state = Arc::new(Mutex::new(ControlServerState {
@@ -198,7 +218,9 @@ pub fn start_control_server(
         db_path,
         source_manager,
         start_source_fn: Some(start_source_fn),
+        start_upload_fn: Some(start_upload_fn),
         metrics,
+        jobs,
     }));
 
     thread::spawn(move || {
@@ -217,14 +239,13 @@ pub fn start_control_server(
 fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let mut data = Vec::new();
-    let mut buf = [0u8; 4096];
+    let mut buf = [0u8; 8192]; // Larger buffer for faster initial reading
     loop {
         let n = stream.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
+        if n == 0 { break; }
         data.extend_from_slice(&buf[..n]);
-        if data.windows(4).any(|w| w == b"\r\n\r\n") || data.len() > 65536 {
+        // Search for end of headers
+        if data.windows(4).any(|w| w == b"\r\n\r\n") || data.len() > 128 * 1024 {
             break;
         }
     }
@@ -244,10 +265,19 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
     let path = parts.next().unwrap_or("");
 
     let mut content_length = 0usize;
+    let mut expect_continue = false;
     for line in lines {
-        if let Some(rest) = line.strip_prefix("Content-Length:") {
-            content_length = rest.trim().parse::<usize>().unwrap_or(0);
+        let lower = line.to_lowercase();
+        if lower.starts_with("content-length:") {
+            content_length = lower["content-length:".len()..].trim().parse::<usize>().unwrap_or(0);
+        } else if lower.starts_with("expect:") && lower.contains("100-continue") {
+            expect_continue = true;
         }
+    }
+
+    // Handle Expect: 100-continue to avoid browser stalls
+    if expect_continue {
+        stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
     }
 
     // Special handling for /api/upload to stream the body
@@ -267,10 +297,12 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
 
         let ctrl_state = state.lock().unwrap();
         let config_path = ctrl_state.config_path.clone();
+        let start_upload_fn = ctrl_state.start_upload_fn.clone();
+        let jobs = ctrl_state.jobs.clone();
         drop(ctrl_state);
 
         // Ensure upload dir exists
-        let upload_dir = config_path.parent().unwrap().join("uploads");
+        let upload_dir = config_path.parent().unwrap().join("uploads").join("recordings");
         std::fs::create_dir_all(&upload_dir).unwrap_or(());
         let target_path = upload_dir.join(&filename);
 
@@ -289,28 +321,72 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
         }
         let mut bytes_written = (data.len() - (header_end + 4)) as usize;
 
-        // Stream the rest
+        // Optimized stream with larger buffer and longer timeout
+        stream.set_read_timeout(Some(Duration::from_secs(60)))?;
+        let mut upload_buf = vec![0u8; 65536];
+        let mut writer = BufWriter::with_capacity(128 * 1024, file);
+
         while bytes_written < content_length {
-            let n = stream.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            file.write_all(&buf[..n])?;
+            let remaining = content_length - bytes_written;
+            let to_read = std::cmp::min(remaining, upload_buf.len());
+            let n = stream.read(&mut upload_buf[..to_read])?;
+            if n == 0 { break; }
+            writer.write_all(&upload_buf[..n])?;
             bytes_written += n;
         }
+        writer.flush()?;
         info!("Upload complete: {} bytes", bytes_written);
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
 
-        // Add to RTSP config if not present
-        if let Ok(mut config) = load_rtsp_config(&config_path) {
-            let full_path = target_path.to_string_lossy().to_string();
-            if !config.rtsp_links.contains(&full_path) {
-                config.rtsp_links.push(full_path);
-                let _ = save_rtsp_config(&config_path, &config);
-            }
+        // Generate a job ID and spawn inference (no MediaMTX, no RTSP config)
+        let job_id = format!("{}_{}", filename, chrono::Local::now().format("%Y%m%d_%H%M%S"));
+        let full_path = target_path.to_string_lossy().to_string();
+
+        {
+            let mut job_map = jobs.lock().unwrap();
+            job_map.insert(job_id.clone(), UploadJob {
+                id: job_id.clone(),
+                filename: filename.clone(),
+                status: "processing".to_string(),
+                output_file: None,
+                error: None,
+            });
+        }
+
+        if let Some(ref start_fn) = start_upload_fn {
+            let job_id_clone = job_id.clone();
+            let jobs_clone = jobs.clone();
+            let handle = start_fn(full_path, Arc::new(AtomicBool::new(false)));
+
+            // Spawn a watcher thread that waits for the inference to finish
+            thread::spawn(move || {
+                let result = handle.join();
+                let mut job_map = jobs_clone.lock().unwrap();
+                if let Some(job) = job_map.get_mut(&job_id_clone) {
+                    match result {
+                        Ok(Some(out_file)) => {
+                            info!("Upload job {} completed: {}", job_id_clone, out_file);
+                            job.status = "done".to_string();
+                            job.output_file = Some(out_file);
+                        }
+                        Ok(None) => {
+                            warn!("Upload job {} finished with no output", job_id_clone);
+                            job.status = "error".to_string();
+                            job.error = Some("Processing finished with no output file".to_string());
+                        }
+                        Err(_) => {
+                            warn!("Upload job {} thread panicked", job_id_clone);
+                            job.status = "error".to_string();
+                            job.error = Some("Processing thread panicked".to_string());
+                        }
+                    }
+                }
+            });
         }
 
          let payload = serde_json::json!({
              "success": true,
+             "job_id": job_id,
              "filename": filename
          });
          return respond(stream, 200, "application/json", &payload.to_string());
@@ -325,6 +401,13 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
         body.extend_from_slice(&buf[..n]);
     }
 
+    // Handle CORS preflight
+    if method == "OPTIONS" {
+        let response = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nAccess-Control-Max-Age: 86400\r\n\r\n";
+        stream.write_all(response.as_bytes())?;
+        return Ok(());
+    }
+
     debug!("Control API: {} {}", method, path);
 
     let ctrl_state = state.lock().unwrap();
@@ -334,6 +417,7 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
     let source_manager = ctrl_state.source_manager.clone();
     let start_source_fn = ctrl_state.start_source_fn.clone();
     let metrics_map = ctrl_state.metrics.clone();
+    let jobs_map = ctrl_state.jobs.clone();
     drop(ctrl_state);
 
     if method == "GET" && path == "/api/overlays" {
@@ -816,6 +900,124 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
         return respond(stream, 401, "application/json", &payload.to_string());
     }
 
+    // GET /api/jobs - list all upload jobs and their status
+    if method == "GET" && path == "/api/jobs" {
+        let job_map = jobs_map.lock().unwrap();
+        let jobs: Vec<&UploadJob> = job_map.values().collect();
+        let payload = serde_json::to_string(&serde_json::json!({ "jobs": jobs }))
+            .unwrap_or_else(|_| "{}".to_string());
+        return respond(stream, 200, "application/json", &payload);
+    }
+
+    // GET /api/jobs/{job_id} - get status of a specific upload job
+    if method == "GET" && path.starts_with("/api/jobs/") {
+        let job_id = &path["/api/jobs/".len()..];
+        let job_map = jobs_map.lock().unwrap();
+        if let Some(job) = job_map.get(job_id) {
+            let payload = serde_json::to_string(job).unwrap_or_else(|_| "{}".to_string());
+            return respond(stream, 200, "application/json", &payload);
+        }
+        return respond(stream, 404, "text/plain", "Job not found");
+    }
+
+    // GET /api/outputs - list available output files in runs/drone_analysis/
+    if method == "GET" && path == "/api/outputs" {
+        let out_dir = db_path.parent().unwrap_or(std::path::Path::new("."));
+        let mut files: Vec<serde_json::Value> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(out_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.ends_with(".mp4") || name.ends_with(".mkv") {
+                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    let modified = entry
+                        .metadata()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    files.push(serde_json::json!({
+                        "name": name,
+                        "size": size,
+                        "modified": modified
+                    }));
+                }
+            }
+        }
+        // Sort by modified desc (most recent first)
+        files.sort_by(|a, b| {
+            let ma = a["modified"].as_u64().unwrap_or(0);
+            let mb = b["modified"].as_u64().unwrap_or(0);
+            mb.cmp(&ma)
+        });
+        let payload = serde_json::to_string(&serde_json::json!({ "files": files }))
+            .unwrap_or_else(|_| "{}".to_string());
+        return respond(stream, 200, "application/json", &payload);
+    }
+
+    // GET /api/download?file={filename} - download an output file
+    if method == "GET" && path.starts_with("/api/download") {
+        let query_part = path.split('?').nth(1).unwrap_or("");
+        let mut filename = String::new();
+        for pair in query_part.split('&') {
+            if let Some(rest) = pair.strip_prefix("file=") {
+                filename = url_decode(rest);
+            }
+        }
+
+        if filename.is_empty() {
+            return respond(stream, 400, "text/plain", "Missing file parameter");
+        }
+
+        // Path traversal protection
+        if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+            return respond(stream, 400, "text/plain", "Invalid filename");
+        }
+
+        let out_dir = db_path.parent().unwrap_or(std::path::Path::new("."));
+        let file_path = out_dir.join(&filename);
+
+        if !file_path.exists() {
+            return respond(stream, 404, "text/plain", "File not found");
+        }
+
+        let content_type = if filename.ends_with(".mkv") {
+            "video/x-matroska"
+        } else {
+            "video/mp4"
+        };
+
+        let file_size = std::fs::metadata(&file_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        let mut file = match File::open(&file_path) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("Failed to open download file: {}", e);
+                return respond(stream, 500, "text/plain", "Failed to open file");
+            }
+        };
+
+        // Write HTTP headers
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nContent-Disposition: attachment; filename=\"{}\"\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+            content_type, file_size, filename
+        );
+        stream.write_all(header.as_bytes())?;
+
+        // Stream file in 64KB chunks
+        let mut buf = vec![0u8; 65536];
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            stream.write_all(&buf[..n])?;
+        }
+        return Ok(());
+    }
+
     debug!("Control API: 404 for {} {}", method, path);
     respond(stream, 404, "text/plain", "Not Found")
 }
@@ -848,6 +1050,7 @@ fn respond(
     let status_line = match status {
         200 => "HTTP/1.1 200 OK",
         400 => "HTTP/1.1 400 Bad Request",
+        401 => "HTTP/1.1 401 Unauthorized",
         404 => "HTTP/1.1 404 Not Found",
         _ => "HTTP/1.1 500 Internal Server Error",
     };

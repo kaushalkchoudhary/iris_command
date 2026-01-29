@@ -109,18 +109,36 @@ impl CaptureWorker {
 pub struct CapturedFrame {
     pub frame: Mat,
     pub idx: usize,
-}pub fn start_capture_thread(
+}
+
+pub fn start_capture_thread(
     mut cap: videoio::VideoCapture,
     stride: usize,
     buffer: usize,
+    is_rtsp: bool,
 ) -> CaptureWorker {
     let (tx, rx) = bounded::<CapturedFrame>(buffer.max(1));
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = Arc::clone(&stop);
 
+    // For local files, get the source FPS for frame-rate throttling
+    let source_fps = if !is_rtsp {
+        let fps = cap.get(videoio::CAP_PROP_FPS).unwrap_or(30.0);
+        if fps > 0.0 && fps.is_finite() { Some(fps) } else { Some(30.0) }
+    } else {
+        None
+    };
+
     let join = thread::spawn(move || -> Result<()> {
         let mut frame = Mat::default();
         let mut idx = 0usize;
+
+        // Frame interval for local files (accounting for stride)
+        let frame_interval = source_fps.map(|fps| {
+            let effective_fps = fps / stride.max(1) as f64;
+            std::time::Duration::from_secs_f64(1.0 / effective_fps.max(1.0))
+        });
+        let mut last_send = std::time::Instant::now();
 
         loop {
             if stop_thread.load(Ordering::Relaxed) {
@@ -128,7 +146,7 @@ pub struct CapturedFrame {
             }
 
             if !cap.read(&mut frame)? {
-                break;
+                break; // end of file or stream
             }
 
             if idx % stride != 0 {
@@ -136,11 +154,24 @@ pub struct CapturedFrame {
                 continue;
             }
 
+            // Throttle local files to source FPS for stable playback
+            if let Some(interval) = frame_interval {
+                let elapsed = last_send.elapsed();
+                if elapsed < interval {
+                    std::thread::sleep(interval - elapsed);
+                }
+            }
+
             let owned = frame.try_clone()?;
             let packet = CapturedFrame { frame: owned, idx };
 
-            let _ = tx.try_send(packet); // ← THIS LINE FIXES FPS
+            if is_rtsp {
+                let _ = tx.try_send(packet); // drop frames if consumer is slow
+            } else {
+                let _ = tx.send(packet); // block until consumer is ready
+            }
 
+            last_send = std::time::Instant::now();
             idx += 1;
         }
 
@@ -194,9 +225,9 @@ pub struct RtspConfig {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum RtspYaml {
-    List(Vec<String>),
-    Map { rtsp_links: Vec<String> },
     Full(RtspConfig),
+    Map { rtsp_links: Vec<String> },
+    List(Vec<String>),
 }
 
 pub fn load_rtsp_config(path: &Path) -> Result<RtspConfig> {
@@ -293,6 +324,7 @@ pub fn init_source_state(
     output: OutputFormat,
     device: Device,
     stride: usize,
+    skip_mediamtx: bool,
 ) -> Result<(SourceState, videoio::VideoCapture)> {
     let label = source_display_name(source);
     let capture_env = "OPENCV_FFMPEG_CAPTURE_OPTIONS";
@@ -327,22 +359,14 @@ pub fn init_source_state(
     let stride = stride.max(1);
     let out_fps = (fps / stride as f64).max(1.0);
 
-    let force_stream = env::var("ALWAYS_STREAM")
-        .map(|v| v == "1" || v == "true")
-        .unwrap_or(false);
-
-    let mediamtx = if is_rtsp || force_stream {
-        let publish_url = env::var("MEDIAMTX_PUBLISH_URL").unwrap_or_else(|_| {
-            let name = if is_rtsp {
-                source_display_name(source)
-            } else {
-                "analytics".to_string()
-            };
-            format!("rtsp://127.0.0.1:8554/processed_{}", name.trim())
-        });
-        Some(start_rtsp_publisher(w, h, out_fps, &publish_url)?)
-    } else {
+    let mediamtx = if skip_mediamtx {
+        info!("[{}] MediaMTX publishing skipped (file-only mode)", label);
         None
+    } else {
+        let name = source_display_name(source);
+        let publish_url = format!("rtsp://127.0.0.1:8554/processed_{}", name.trim());
+        info!("[{}] Publishing to MediaMTX at: {}", label, publish_url);
+        Some(start_rtsp_publisher(w, h, out_fps, &publish_url)?)
     };
 
     let timestamp = Local::now().format("%Y%m%d_%H%M%S");
@@ -429,6 +453,7 @@ pub fn init_source_state(
             mobility_index_ema: 0.0,
             mediamtx,
             device,
+            out_path,
         },
         cap,
     ))

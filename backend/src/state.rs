@@ -22,8 +22,8 @@ pub const MAX_TRACK_AGE: usize = 30;
 pub const ORPHAN_MATCH_DIST: f32 = 60.0;
 
 // Heatmap
-pub const HEATMAP_DECAY: f32 = 0.95;
-pub const HEATMAP_RADIUS: i32 = 6;
+pub const HEATMAP_DECAY: f32 = 0.97;
+pub const HEATMAP_RADIUS: i32 = 22;
 
 // Speed thresholds (px/sec)
 pub const THRESH_STALLED: f32 = 8.0;
@@ -34,7 +34,7 @@ pub const THRESH_MEDIUM: f32 = 160.0;
 pub const TARGET_CLASSES: [i64; 6] = [3, 4, 5, 7, 8, 9];
 
 // Trails
-pub const MAX_TRAIL_LEN: usize = 15;
+pub const MAX_TRAIL_LEN: usize = 40;
 pub const TRAIL_THICKNESS: i32 = 1;
 
 // ================== CORE TYPES ==================
@@ -151,6 +151,7 @@ pub struct SourceState {
     pub mobility_index_ema: f32,
     pub mediamtx: Option<RtspPublisher>,
     pub device: Device,
+    pub out_path: std::path::PathBuf,
 }
 
 #[derive(Default)]

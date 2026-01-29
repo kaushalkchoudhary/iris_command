@@ -11,6 +11,37 @@ rtsp_links:
 - rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone10
 - rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone11
 - rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone12
-- /home/ubuntu/Desktop/iris_command/backend/data/uploads/drone_analysis_20260127_205516.mp4
-active_sources: []
-overlays: {}
+- /home/ubuntu/Desktop/iris_command/backend/data/uploads/recordings/drone_analysis_20260127_203413.mkv
+active_sources:
+- 2
+- 6
+- 10
+overlays:
+  bcpdrone9:
+    heatmap: false
+    trails: true
+    bboxes: true
+  bcpdrone8:
+    heatmap: false
+    trails: true
+    bboxes: true
+  drone_analysis_20260127_203413:
+    heatmap: false
+    trails: true
+    bboxes: true
+  bcpdrone1:
+    heatmap: false
+    trails: true
+    bboxes: true
+  bcpdrone10:
+    heatmap: false
+    trails: true
+    bboxes: true
+  bcpdrone12:
+    heatmap: false
+    trails: true
+    bboxes: true
+  bcpdrone6:
+    heatmap: false
+    trails: false
+    bboxes: true

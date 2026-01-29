@@ -28,7 +28,7 @@ pub fn start_rtsp_publisher(
 
     let mut child = Command::new("ffmpeg")
         .args([
-            "-loglevel", "error",
+            "-loglevel", "info",
             "-fflags", "nobuffer",
             "-flags", "low_delay",
             "-analyzeduration", "0",
@@ -50,7 +50,11 @@ pub fn start_rtsp_publisher(
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
-        .spawn()?;
+        .spawn()
+        .map_err(|e| {
+            error!("Failed to spawn FFmpeg: {}", e);
+            e
+        })?;
 
     let stdin = child.stdin.take().expect("ffmpeg stdin");
 

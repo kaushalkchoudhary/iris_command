@@ -1,0 +1,55 @@
+logLevel: info
+logDestinations: [stdout]
+
+api: yes
+apiAddress: :9997
+
+rtsp: yes
+rtspAddress: :8554
+rtspTransports: [tcp]
+
+hls: yes
+hlsAddress: :8888
+hlsAllowOrigins: ['*']
+hlsVariant: fmp4
+hlsSegmentCount: 3
+hlsSegmentDuration: 1s
+hlsSegmentMaxSize: 50M
+hlsAlwaysRemux: yes
+
+webrtc: yes
+webrtcAddress: :8889
+webrtcAllowOrigins: ['*']
+webrtcICEServers2: []
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :8189
+
+paths:
+  "~^processed_.*$":
+    source: publisher
+    record: no
+
+  bcpdrone1:
+    source: rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone1
+  bcpdrone2:
+    source: rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone2
+  bcpdrone3:
+    source: rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone3
+  bcpdrone4:
+    source: rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone4
+  bcpdrone5:
+    source: rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone5
+  bcpdrone6:
+    source: rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone6
+  bcpdrone7:
+    source: rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone7
+  bcpdrone8:
+    source: rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone8
+  bcpdrone9:
+    source: rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone9
+  bcpdrone10:
+    source: rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone10
+  bcpdrone11:
+    source: rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone11
+  bcpdrone12:
+    source: rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone12

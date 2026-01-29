@@ -19,7 +19,7 @@ const DRONE_REGION_MAP = {
   bcpdrone12: 'JP Nagar Phase 6',
 };
 
-const Footer = ({ selectedVideos, onVideosChange, videos }) => {
+const Footer = ({ selectedVideos, onVideosChange, videos, onRefresh }) => {
   const [time, setTime] = useState(() =>
     new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
   );
@@ -32,6 +32,14 @@ const Footer = ({ selectedVideos, onVideosChange, videos }) => {
   const [latency, setLatency] = useState(42);
   const [bandwidth, setBandwidth] = useState(0);
   const [signalStrength, setSignalStrength] = useState(0);
+
+  // Auto-refresh sources every 5 seconds to sync uploads
+  useEffect(() => {
+    if (onRefresh) {
+      const interval = setInterval(onRefresh, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [onRefresh]);
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -86,6 +94,19 @@ const Footer = ({ selectedVideos, onVideosChange, videos }) => {
   const availableVideos = Array.isArray(videos) ? videos : [];
   const total = availableVideos.length;
   const activeCount = useMemo(() => selectedVideos?.length || 0, [selectedVideos]);
+
+  // Pre-calculate mapping for "UP 1", "UP 2"
+  const uploadedMap = useMemo(() => {
+    const map = {};
+    let count = 0;
+    availableVideos.forEach(v => {
+      if (v.label === 'UPLOADED') {
+        count++;
+        map[v.id] = `UP ${count}`;
+      }
+    });
+    return map;
+  }, [availableVideos]);
 
   const toggleVideo = (video) => {
     const isSelected = selectedVideos.some(v => v.id === video.id);
@@ -159,13 +180,14 @@ const Footer = ({ selectedVideos, onVideosChange, videos }) => {
           <span className="text-[10px] text-white/40 tracking-wider mr-2">UNITS</span>
           {availableVideos.map((vid, idx) => {
             const selected = isSelected(vid.id);
+            const label = vid.label === 'UPLOADED' ? (uploadedMap[vid.id] || 'UP') : String(idx + 1).padStart(2, '0');
 
             return (
               <div key={vid.id} className="relative group">
                 <button
                   onClick={() => toggleVideo(vid)}
                   className={clsx(
-                    'relative flex items-center justify-center w-8 h-6 transition-all border',
+                    'relative flex items-center justify-center min-w-[2.25rem] h-6 px-1.5 transition-all border',
                     selected
                       ? 'bg-emerald-500/20 border-emerald-500/60 text-emerald-400'
                       : 'bg-white/[0.02] border-white/10 text-white/40 hover:border-white/30 hover:text-white/70'
@@ -176,8 +198,8 @@ const Footer = ({ selectedVideos, onVideosChange, videos }) => {
                     <div className="absolute top-0 left-0 right-0 h-[2px] bg-emerald-400" />
                   )}
 
-                  <span className="font-bold text-[11px] tracking-wider">
-                    {vid.label === 'UPLOADED' ? 'UP' : String(idx + 1).padStart(2, '0')}
+                  <span className="font-bold text-[9px] tracking-wider uppercase">
+                    {label}
                   </span>
                 </button>
 
@@ -190,7 +212,7 @@ const Footer = ({ selectedVideos, onVideosChange, videos }) => {
 
                     {/* REGION — SAME AS RIGHT PANEL */}
                     <div className="font-bold text-emerald-400">
-                      {DRONE_REGION_MAP[vid.id] || 'UNKNOWN REGION'}
+                      {DRONE_REGION_MAP[vid.id] || (vid.label === 'UPLOADED' ? 'FILE FEED' : 'UNKNOWN REGION')}
                     </div>
 
                     {/* DRONE LABEL — SECONDARY */}

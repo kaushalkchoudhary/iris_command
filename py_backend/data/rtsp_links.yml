@@ -1,0 +1,65 @@
+active_sources:
+- 8
+- 10
+overlays:
+  bcpdrone1:
+    bboxes: true
+    heatmap: true
+    trails: true
+  bcpdrone10:
+    bboxes: true
+    heatmap: true
+    trails: true
+  bcpdrone11:
+    bboxes: true
+    heatmap: true
+    trails: true
+  bcpdrone12:
+    bboxes: true
+    heatmap: true
+    trails: true
+  bcpdrone2:
+    bboxes: true
+    heatmap: true
+    trails: true
+  bcpdrone3:
+    bboxes: true
+    heatmap: true
+    trails: true
+  bcpdrone4:
+    bboxes: true
+    heatmap: true
+    trails: true
+  bcpdrone5:
+    bboxes: true
+    heatmap: true
+    trails: true
+  bcpdrone6:
+    bboxes: true
+    heatmap: true
+    trails: true
+  bcpdrone7:
+    bboxes: true
+    heatmap: true
+    trails: true
+  bcpdrone8:
+    bboxes: true
+    heatmap: true
+    trails: true
+  bcpdrone9:
+    bboxes: true
+    heatmap: true
+    trails: true
+rtsp_links:
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone1
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone2
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone3
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone4
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone5
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone6
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone7
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone8
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone9
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone10
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone11
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone12

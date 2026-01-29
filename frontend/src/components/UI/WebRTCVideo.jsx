@@ -28,9 +28,11 @@ const WebRTCVideo = ({
   const [error, setError] = useState(null);
   const [retryCount, setRetryCount] = useState(0);
   const [usedWebrtcFallback, setUsedWebrtcFallback] = useState(false);
+  const primaryRetryRef = useRef(null);
 
-  const MAX_RETRIES = 3;
-  const RETRY_DELAY = 1500;
+  const MAX_RETRIES = 5;
+  const RETRY_DELAY = 2000;
+  const PRIMARY_RETRY_INTERVAL = 5000; // Retry primary stream every 5s when on fallback
 
   useEffect(() => {
     setActiveSrc(src);
@@ -173,12 +175,44 @@ const WebRTCVideo = ({
     video.play().catch(() => {});
   }, [useFallback, fallbackSrc]);
 
+  // Periodically retry primary (processed) stream when on fallback
+  useEffect(() => {
+    if (!usedWebrtcFallback || !src) return;
+
+    const tryPrimary = async () => {
+      try {
+        // Quick check if the processed stream responds
+        const res = await fetch(src.split('?')[0], {
+          method: 'OPTIONS',
+        });
+        if (res.ok) {
+          // Stream is available, switch back to it
+          setUsedWebrtcFallback(false);
+          setRetryCount(0);
+          setActiveSrc(`${src}?r=${Date.now()}`);
+        }
+      } catch {
+        // Stream not ready yet, will retry
+      }
+    };
+
+    primaryRetryRef.current = setInterval(tryPrimary, PRIMARY_RETRY_INTERVAL);
+    // Try immediately once
+    tryPrimary();
+
+    return () => {
+      if (primaryRetryRef.current) {
+        clearInterval(primaryRetryRef.current);
+      }
+    };
+  }, [usedWebrtcFallback, src]);
+
   if (error && !fallbackSrc) {
     return (
-      <div className={`flex items-center justify-center bg-black ${className}`}>
+      <div className={`flex items-center justify-center bg-black/90 ${className}`}>
         <div className="text-center font-mono">
-          <div className="text-emerald-400 text-sm tracking-widest">{error}</div>
-          <div className="text-white/40 text-xs mt-1">Awaiting signal…</div>
+          <div className="text-white/20 text-xs tracking-[0.3em] uppercase">No Signal</div>
+          <div className="w-8 h-[1px] bg-white/10 mx-auto mt-2" />
         </div>
       </div>
     );
