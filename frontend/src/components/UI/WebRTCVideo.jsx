@@ -1,5 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 
+/* ============================
+   ICE GATHER HELPER
+============================ */
 const waitForIceGatheringComplete = (pc) =>
   new Promise((resolve) => {
     if (pc.iceGatheringState === 'complete') {
@@ -15,31 +18,54 @@ const waitForIceGatheringComplete = (pc) =>
     pc.addEventListener('icegatheringstatechange', onStateChange);
   });
 
-const WebRTCVideo = ({ src, fallbackWebrtcSrc, fallbackSrc, className, ...props }) => {
+/* ============================
+   WEBRTC VIDEO
+============================ */
+const WebRTCVideo = ({
+  src,
+  fallbackWebrtcSrc,
+  fallbackSrc,
+  className = '',
+  ...props
+}) => {
   const videoRef = useRef(null);
   const pcRef = useRef(null);
   const sessionUrlRef = useRef(null);
+
+  const [activeSrc, setActiveSrc] = useState(src);
   const [useFallback, setUseFallback] = useState(false);
   const [error, setError] = useState(null);
-  const [activeSrc, setActiveSrc] = useState(src);
-  const [triedWebrtcFallback, setTriedWebrtcFallback] = useState(false);
-  const [retryCount, setRetryCount] = useState(0);
-  const maxRetries = 5;
-  const retryDelay = 2000; // 2 seconds between retries
 
+  const [retryCount, setRetryCount] = useState(0);
+  const [usedWebrtcFallback, setUsedWebrtcFallback] = useState(false);
+
+  const MAX_RETRIES = 5;
+  const RETRY_DELAY = 2000;
+
+  /* ============================
+     RESET ON SRC CHANGE
+  ============================ */
   useEffect(() => {
     setActiveSrc(src);
-    setTriedWebrtcFallback(false);
     setRetryCount(0);
+    setUsedWebrtcFallback(false);
+    setUseFallback(false);
+    setError(null);
   }, [src]);
 
+  /* ============================
+     MAIN WEBRTC SETUP
+  ============================ */
   useEffect(() => {
     let cancelled = false;
     const video = videoRef.current;
     if (!video || !activeSrc) return;
 
-    setUseFallback(false);
-    setError(null);
+    // Hard reset video element
+    video.pause();
+    video.srcObject = null;
+    video.removeAttribute('src');
+    video.load();
 
     const pc = new RTCPeerConnection();
     pcRef.current = pc;
@@ -55,30 +81,33 @@ const WebRTCVideo = ({ src, fallbackWebrtcSrc, fallbackSrc, className, ...props 
     };
 
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'failed' && !cancelled) {
-        // Retry primary stream a few times before falling back (gives backend time to start)
-        const activeSrcBase = activeSrc.split('?')[0];
-        if (retryCount < maxRetries && activeSrcBase === src) {
-          console.log(`WebRTC: Retrying primary stream (${retryCount + 1}/${maxRetries})...`);
-          setTimeout(() => {
-            if (!cancelled) {
-              setRetryCount(r => r + 1);
-              setActiveSrc(src + '?retry=' + Date.now()); // Force re-render
-            }
-          }, retryDelay);
-          return;
-        }
-        if (!triedWebrtcFallback && fallbackWebrtcSrc) {
-          console.log('WebRTC: Falling back to raw stream');
-          setTriedWebrtcFallback(true);
-          setActiveSrc(fallbackWebrtcSrc);
-          return;
-        }
-        if (fallbackSrc) {
-          setUseFallback(true);
-        } else {
-          setError('Stream unavailable');
-        }
+      if (pc.connectionState !== 'failed' || cancelled) return;
+
+      const baseSrc = activeSrc.split('?')[0];
+
+      // Retry primary feed first
+      if (retryCount < MAX_RETRIES && baseSrc === src) {
+        setTimeout(() => {
+          if (!cancelled) {
+            setRetryCount((c) => c + 1);
+            setActiveSrc(`${src}?retry=${Date.now()}`);
+          }
+        }, RETRY_DELAY);
+        return;
+      }
+
+      // WebRTC fallback (raw feed)
+      if (!usedWebrtcFallback && fallbackWebrtcSrc) {
+        setUsedWebrtcFallback(true);
+        setActiveSrc(fallbackWebrtcSrc);
+        return;
+      }
+
+      // Final fallback (HLS / MP4)
+      if (fallbackSrc) {
+        setUseFallback(true);
+      } else {
+        setError('STREAM UNAVAILABLE');
       }
     };
 
@@ -88,24 +117,20 @@ const WebRTCVideo = ({ src, fallbackWebrtcSrc, fallbackSrc, className, ...props 
         await pc.setLocalDescription(offer);
         await waitForIceGatheringComplete(pc);
 
-        const fetchUrl = activeSrc.split('?')[0]; // Strip retry query param
+        const fetchUrl = activeSrc.split('?')[0];
         const response = await fetch(fetchUrl, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/sdp',
-          },
+          headers: { 'Content-Type': 'application/sdp' },
           body: pc.localDescription?.sdp || '',
         });
 
         if (!response.ok) {
-          throw new Error(`WebRTC signaling failed (${response.status})`);
+          throw new Error(`Signaling failed (${response.status})`);
         }
 
         const answerSdp = await response.text();
         const sessionUrl = response.headers.get('Location');
-        if (sessionUrl) {
-          sessionUrlRef.current = sessionUrl;
-        }
+        if (sessionUrl) sessionUrlRef.current = sessionUrl;
 
         await pc.setRemoteDescription({
           type: 'answer',
@@ -113,28 +138,29 @@ const WebRTCVideo = ({ src, fallbackWebrtcSrc, fallbackSrc, className, ...props 
         });
       } catch (err) {
         if (cancelled) return;
-        // Retry primary stream a few times before falling back
-        const activeSrcBase = activeSrc.split('?')[0];
-        if (retryCount < maxRetries && activeSrcBase === src) {
-          console.log(`WebRTC: Retrying primary stream after error (${retryCount + 1}/${maxRetries})...`);
+
+        const baseSrc = activeSrc.split('?')[0];
+
+        if (retryCount < MAX_RETRIES && baseSrc === src) {
           setTimeout(() => {
             if (!cancelled) {
-              setRetryCount(r => r + 1);
-              setActiveSrc(src + '?retry=' + Date.now());
+              setRetryCount((c) => c + 1);
+              setActiveSrc(`${src}?retry=${Date.now()}`);
             }
-          }, retryDelay);
+          }, RETRY_DELAY);
           return;
         }
-        if (!triedWebrtcFallback && fallbackWebrtcSrc) {
-          console.log('WebRTC: Falling back to raw stream after error');
-          setTriedWebrtcFallback(true);
+
+        if (!usedWebrtcFallback && fallbackWebrtcSrc) {
+          setUsedWebrtcFallback(true);
           setActiveSrc(fallbackWebrtcSrc);
           return;
         }
+
         if (fallbackSrc) {
           setUseFallback(true);
         } else {
-          setError(err?.message || 'WebRTC error');
+          setError(err?.message || 'WEBRTC ERROR');
         }
       }
     };
@@ -143,38 +169,60 @@ const WebRTCVideo = ({ src, fallbackWebrtcSrc, fallbackSrc, className, ...props 
 
     return () => {
       cancelled = true;
+
       if (sessionUrlRef.current) {
         fetch(sessionUrlRef.current, { method: 'DELETE' }).catch(() => {});
         sessionUrlRef.current = null;
       }
+
       pc.close();
       pcRef.current = null;
     };
-  }, [activeSrc, fallbackSrc, fallbackWebrtcSrc, triedWebrtcFallback, retryCount, src]);
+  }, [activeSrc, src, fallbackWebrtcSrc, fallbackSrc, retryCount, usedWebrtcFallback]);
 
+  /* ============================
+     FINAL FALLBACK (FILE / HLS)
+  ============================ */
   useEffect(() => {
-    if (useFallback && fallbackSrc && videoRef.current) {
-      videoRef.current.srcObject = null;
-      videoRef.current.src = fallbackSrc;
-      videoRef.current.play().catch(() => {});
-    }
+    if (!useFallback || !fallbackSrc || !videoRef.current) return;
+    const video = videoRef.current;
+    video.srcObject = null;
+    video.src = fallbackSrc;
+    video.play().catch(() => {});
   }, [useFallback, fallbackSrc]);
 
+  /* ============================
+     ERROR STATE (MINIMAL)
+  ============================ */
   if (error && !fallbackSrc) {
     return (
-      <div className={`flex items-center justify-center bg-black/50 ${className}`}>
-        <div className="text-center">
-          <div className="text-red-500 text-sm font-mono">{error}</div>
-          <div className="text-white/50 text-xs mt-1">Waiting for stream...</div>
+      <div className={`flex items-center justify-center bg-black ${className}`}>
+        <div className="text-center font-mono">
+          <div className="text-emerald-400 text-sm tracking-widest">
+            {error}
+          </div>
+          <div className="text-white/40 text-xs mt-1">
+            Awaiting signal…
+          </div>
         </div>
       </div>
     );
   }
 
+  /* ============================
+     VIDEO RENDER (IRIS STYLE)
+  ============================ */
   return (
     <video
       ref={videoRef}
-      className={className}
+      className={`
+        w-full h-full object-cover
+        iris-video
+        ${className}
+      `}
+      playsInline
+      muted
+      autoPlay
       {...props}
     />
   );

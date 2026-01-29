@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::helpers::{load_rtsp_config, mask_rtsp_credentials, save_rtsp_config, source_display_name, OverlayConfig};
+use crate::helpers::{
+    load_rtsp_config, mask_rtsp_credentials, save_rtsp_config, source_display_name, OverlayConfig,
+};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 pub struct OverlayState {
@@ -82,6 +84,22 @@ struct ToggleSourceRequest {
 
 pub type OverlayMap = Arc<Mutex<HashMap<String, OverlayState>>>;
 
+/// Real-time metrics for a source (updated by processing threads)
+#[derive(Debug, Clone, Copy, Serialize, Default)]
+pub struct SourceMetrics {
+    pub fps: f32,
+    pub congestion_index: i32,
+    pub traffic_density: i32,
+    pub mobility_index: i32,
+    pub stalled_pct: i32,
+    pub slow_pct: i32,
+    pub medium_pct: i32,
+    pub fast_pct: i32,
+    pub detection_count: usize,
+}
+
+pub type MetricsMap = Arc<Mutex<HashMap<String, SourceMetrics>>>;
+
 /// Running source handle with stop signal
 pub struct RunningSource {
     pub index: usize,
@@ -140,7 +158,8 @@ impl SourceManager {
 pub type SharedSourceManager = Arc<Mutex<SourceManager>>;
 
 /// Callback type for starting a source processor
-pub type StartSourceFn = Arc<dyn Fn(usize, String, Arc<AtomicBool>) -> JoinHandle<()> + Send + Sync>;
+pub type StartSourceFn =
+    Arc<dyn Fn(usize, String, Arc<AtomicBool>) -> JoinHandle<()> + Send + Sync>;
 
 /// Shared state for the control server including config path for persistence
 pub struct ControlServerState {
@@ -148,6 +167,7 @@ pub struct ControlServerState {
     pub config_path: PathBuf,
     pub source_manager: SharedSourceManager,
     pub start_source_fn: Option<StartSourceFn>,
+    pub metrics: MetricsMap,
 }
 
 pub type SharedControlState = Arc<Mutex<ControlServerState>>;
@@ -158,6 +178,7 @@ pub fn start_control_server(
     config_path: PathBuf,
     source_manager: SharedSourceManager,
     start_source_fn: StartSourceFn,
+    metrics: MetricsMap,
 ) -> thread::JoinHandle<()> {
     let addr = addr.to_string();
     let state = Arc::new(Mutex::new(ControlServerState {
@@ -165,6 +186,7 @@ pub fn start_control_server(
         config_path,
         source_manager,
         start_source_fn: Some(start_source_fn),
+        metrics,
     }));
 
     thread::spawn(move || {
@@ -232,6 +254,7 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
     let config_path = ctrl_state.config_path.clone();
     let source_manager = ctrl_state.source_manager.clone();
     let start_source_fn = ctrl_state.start_source_fn.clone();
+    let metrics_map = ctrl_state.metrics.clone();
     drop(ctrl_state);
 
     if method == "GET" && path == "/api/overlays" {
@@ -255,8 +278,11 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
                 let payload = serde_json::to_string(state).unwrap_or_else(|_| "{}".to_string());
                 return respond(stream, 200, "application/json", &payload);
             }
-            warn!("Control API: Stream '{}' not found. Available: {:?}",
-                  stream_name, map.keys().collect::<Vec<_>>());
+            warn!(
+                "Control API: Stream '{}' not found. Available: {:?}",
+                stream_name,
+                map.keys().collect::<Vec<_>>()
+            );
             return respond(stream, 404, "text/plain", "Not Found");
         }
 
@@ -266,16 +292,21 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
                 trails: None,
                 bboxes: None,
             });
-            debug!("POST overlay update for '{}': heatmap={:?}, trails={:?}, bboxes={:?}",
-                   stream_name, update.heatmap, update.trails, update.bboxes);
+            debug!(
+                "POST overlay update for '{}': heatmap={:?}, trails={:?}, bboxes={:?}",
+                stream_name, update.heatmap, update.trails, update.bboxes
+            );
 
             let next = {
                 let mut map = overlays.lock().unwrap();
 
                 // Check if stream exists
                 if !map.contains_key(stream_name) {
-                    warn!("Control API: Stream '{}' not found for update. Available: {:?}",
-                          stream_name, map.keys().collect::<Vec<_>>());
+                    warn!(
+                        "Control API: Stream '{}' not found for update. Available: {:?}",
+                        stream_name,
+                        map.keys().collect::<Vec<_>>()
+                    );
                 }
 
                 let current = map.get(stream_name).copied().unwrap_or_default();
@@ -285,8 +316,10 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
                     bboxes: update.bboxes.unwrap_or(current.bboxes),
                 };
                 map.insert(stream_name.to_string(), next);
-                info!("[{}] Overlay state changed: heatmap={}, trails={}, bboxes={}",
-                      stream_name, next.heatmap, next.trails, next.bboxes);
+                info!(
+                    "[{}] Overlay state changed: heatmap={}, trails={}, bboxes={}",
+                    stream_name, next.heatmap, next.trails, next.bboxes
+                );
                 next
             };
 
@@ -340,7 +373,14 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
     if method == "POST" && path == "/api/sources/start" {
         let req: SourceIndexRequest = match serde_json::from_slice(&body) {
             Ok(r) => r,
-            Err(_) => return respond(stream, 400, "text/plain", "Invalid JSON: expected {\"index\": N}"),
+            Err(_) => {
+                return respond(
+                    stream,
+                    400,
+                    "text/plain",
+                    "Invalid JSON: expected {\"index\": N}",
+                )
+            }
         };
 
         let config = match load_rtsp_config(&config_path) {
@@ -352,9 +392,16 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
         };
 
         if req.index < 1 || req.index > config.rtsp_links.len() {
-            return respond(stream, 400, "text/plain", &format!(
-                "Invalid index {}: must be between 1 and {}", req.index, config.rtsp_links.len()
-            ));
+            return respond(
+                stream,
+                400,
+                "text/plain",
+                &format!(
+                    "Invalid index {}: must be between 1 and {}",
+                    req.index,
+                    config.rtsp_links.len()
+                ),
+            );
         }
 
         let url = config.rtsp_links[req.index - 1].clone();
@@ -367,7 +414,8 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
                 "index": req.index,
                 "name": name,
                 "status": "already_running"
-            })).unwrap_or_else(|_| "{}".to_string());
+            }))
+            .unwrap_or_else(|_| "{}".to_string());
             return respond(stream, 200, "application/json", &payload);
         }
 
@@ -379,13 +427,16 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
             None
         };
 
-        mgr.running.insert(req.index, RunningSource {
-            index: req.index,
-            name: name.clone(),
-            url: url.clone(),
-            stop_signal,
-            handle,
-        });
+        mgr.running.insert(
+            req.index,
+            RunningSource {
+                index: req.index,
+                name: name.clone(),
+                url: url.clone(),
+                stop_signal,
+                handle,
+            },
+        );
 
         // Update config file - reload to preserve any concurrent overlay changes
         drop(mgr);
@@ -402,7 +453,8 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
             "index": req.index,
             "name": name,
             "status": "started"
-        })).unwrap_or_else(|_| "{}".to_string());
+        }))
+        .unwrap_or_else(|_| "{}".to_string());
         return respond(stream, 200, "application/json", &payload);
     }
 
@@ -411,7 +463,14 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
     if method == "POST" && path == "/api/sources/stop" {
         let req: SourceIndexRequest = match serde_json::from_slice(&body) {
             Ok(r) => r,
-            Err(_) => return respond(stream, 400, "text/plain", "Invalid JSON: expected {\"index\": N}"),
+            Err(_) => {
+                return respond(
+                    stream,
+                    400,
+                    "text/plain",
+                    "Invalid JSON: expected {\"index\": N}",
+                )
+            }
         };
 
         let config = match load_rtsp_config(&config_path) {
@@ -423,9 +482,16 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
         };
 
         if req.index < 1 || req.index > config.rtsp_links.len() {
-            return respond(stream, 400, "text/plain", &format!(
-                "Invalid index {}: must be between 1 and {}", req.index, config.rtsp_links.len()
-            ));
+            return respond(
+                stream,
+                400,
+                "text/plain",
+                &format!(
+                    "Invalid index {}: must be between 1 and {}",
+                    req.index,
+                    config.rtsp_links.len()
+                ),
+            );
         }
 
         let name = source_display_name(&config.rtsp_links[req.index - 1]);
@@ -446,14 +512,16 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
                 "index": req.index,
                 "name": name,
                 "status": "stopped"
-            })).unwrap_or_else(|_| "{}".to_string());
+            }))
+            .unwrap_or_else(|_| "{}".to_string());
             return respond(stream, 200, "application/json", &payload);
         } else {
             let payload = serde_json::to_string(&serde_json::json!({
                 "index": req.index,
                 "name": name,
                 "status": "not_running"
-            })).unwrap_or_else(|_| "{}".to_string());
+            }))
+            .unwrap_or_else(|_| "{}".to_string());
             return respond(stream, 200, "application/json", &payload);
         }
     }
@@ -463,7 +531,14 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
     if method == "POST" && path == "/api/sources/active" {
         let req: SetActiveSourcesRequest = match serde_json::from_slice(&body) {
             Ok(r) => r,
-            Err(_) => return respond(stream, 400, "text/plain", "Invalid JSON: expected {\"indexes\": [1, 2, ...]}"),
+            Err(_) => {
+                return respond(
+                    stream,
+                    400,
+                    "text/plain",
+                    "Invalid JSON: expected {\"indexes\": [1, 2, ...]}",
+                )
+            }
         };
 
         let config = match load_rtsp_config(&config_path) {
@@ -477,9 +552,16 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
         // Validate all indexes
         for idx in &req.indexes {
             if *idx < 1 || *idx > config.rtsp_links.len() {
-                return respond(stream, 400, "text/plain", &format!(
-                    "Invalid index {}: must be between 1 and {}", idx, config.rtsp_links.len()
-                ));
+                return respond(
+                    stream,
+                    400,
+                    "text/plain",
+                    &format!(
+                        "Invalid index {}: must be between 1 and {}",
+                        idx,
+                        config.rtsp_links.len()
+                    ),
+                );
             }
         }
 
@@ -491,7 +573,8 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
         let currently_running = mgr.get_running_indexes();
 
         // Stop sources that should no longer be running
-        let to_stop: Vec<usize> = currently_running.iter()
+        let to_stop: Vec<usize> = currently_running
+            .iter()
             .filter(|i| !desired.contains(i))
             .copied()
             .collect();
@@ -500,7 +583,8 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
         }
 
         // Start sources that should be running
-        let to_start: Vec<usize> = desired.iter()
+        let to_start: Vec<usize> = desired
+            .iter()
             .filter(|i| !currently_running.contains(i))
             .copied()
             .collect();
@@ -514,13 +598,16 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
             } else {
                 None
             };
-            mgr.running.insert(*idx, RunningSource {
-                index: *idx,
-                name,
-                url,
-                stop_signal,
-                handle,
-            });
+            mgr.running.insert(
+                *idx,
+                RunningSource {
+                    index: *idx,
+                    name,
+                    url,
+                    stop_signal,
+                    handle,
+                },
+            );
         }
 
         let final_running = mgr.get_running_indexes();
@@ -543,7 +630,8 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
             "names": names,
             "started": to_start,
             "stopped": to_stop
-        })).unwrap_or_else(|_| "{}".to_string());
+        }))
+        .unwrap_or_else(|_| "{}".to_string());
         return respond(stream, 200, "application/json", &payload);
     }
 
@@ -567,7 +655,17 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
         let payload = serde_json::to_string(&serde_json::json!({
             "active_sources": active,
             "names": names
-        })).unwrap_or_else(|_| "{}".to_string());
+        }))
+        .unwrap_or_else(|_| "{}".to_string());
+        return respond(stream, 200, "application/json", &payload);
+    }
+
+    // GET /api/metrics - get current metrics for all active sources
+    if method == "GET" && path == "/api/metrics" {
+        // Return real metrics from the shared metrics map
+        let metrics_guard = metrics_map.lock().unwrap();
+        let payload = serde_json::to_string(&*metrics_guard).unwrap_or_else(|_| "{}".to_string());
+        drop(metrics_guard);
         return respond(stream, 200, "application/json", &payload);
     }
 
@@ -576,15 +674,30 @@ fn handle_request(stream: &mut TcpStream, state: SharedControlState) -> std::io:
 }
 
 /// Save overlay state to the RTSP config file for persistence
-fn persist_overlay_to_config(config_path: &PathBuf, stream_name: &str, state: OverlayState) -> anyhow::Result<()> {
+fn persist_overlay_to_config(
+    config_path: &PathBuf,
+    stream_name: &str,
+    state: OverlayState,
+) -> anyhow::Result<()> {
     let mut config = load_rtsp_config(config_path)?;
-    config.overlays.insert(stream_name.to_string(), state.into());
+    config
+        .overlays
+        .insert(stream_name.to_string(), state.into());
     save_rtsp_config(config_path, &config)?;
-    debug!("Persisted overlay config for '{}' to {}", stream_name, config_path.display());
+    debug!(
+        "Persisted overlay config for '{}' to {}",
+        stream_name,
+        config_path.display()
+    );
     Ok(())
 }
 
-fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &str) -> std::io::Result<()> {
+fn respond(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &str,
+) -> std::io::Result<()> {
     let status_line = match status {
         200 => "HTTP/1.1 200 OK",
         400 => "HTTP/1.1 400 Bad Request",

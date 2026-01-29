@@ -25,7 +25,7 @@ mod state;
 use state::*;
 mod mediamtx;
 mod control;
-use control::{OverlayMap, OverlayState, SourceManager, SharedSourceManager, RunningSource};
+use control::{MetricsMap, OverlayMap, OverlayState, SourceManager, SourceMetrics, SharedSourceManager, RunningSource};
 mod db;
 use db::Db;
 #[cfg(feature = "trt_engine")]
@@ -137,6 +137,7 @@ fn process_source(
     data_dir: &PathBuf,
     base_device: Device,
     overlays: OverlayMap,
+    metrics_map: MetricsMap,
     show_ui: bool,
     stop_signal: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<()> {
@@ -352,6 +353,8 @@ fn process_source(
     let mut frame_count = 0usize;
     let mut last_log_time = Instant::now();
     let log_interval_secs = 10;
+    let mut last_metrics_update = Instant::now();
+    let mut metrics_frame_count = 0usize;
 
     loop {
         // Check for external stop signal
@@ -450,6 +453,29 @@ fn process_source(
                 medium_pct,
                 fast_pct,
             );
+
+            // Update shared metrics frequently for real-time API access
+            metrics_frame_count += 1;
+            if last_metrics_update.elapsed().as_millis() >= 500 {
+                let elapsed = last_metrics_update.elapsed().as_secs_f32();
+                let fps_actual = metrics_frame_count as f32 / elapsed;
+                {
+                    let mut metrics = metrics_map.lock().unwrap();
+                    metrics.insert(source_label.clone(), SourceMetrics {
+                        fps: fps_actual,
+                        congestion_index: congestion,
+                        traffic_density: traffic_density_pct,
+                        mobility_index: mobility_index_pct,
+                        stalled_pct,
+                        slow_pct,
+                        medium_pct,
+                        fast_pct,
+                        detection_count: dets.len(),
+                    });
+                }
+                metrics_frame_count = 0;
+                last_metrics_update = Instant::now();
+            }
 
             // Periodic status logging
             frame_count += 1;
@@ -712,6 +738,7 @@ fn process_video() -> Result<()> {
     }
 
     let overlays: OverlayMap = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let metrics_map: MetricsMap = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
 
     // Initialize overlays for all available sources
     for url in &sources {
@@ -738,6 +765,7 @@ fn process_video() -> Result<()> {
     let data_dir_for_callback = data_dir.clone();
     let device_for_callback = inference_device.clone();
     let overlays_for_callback = overlays.clone();
+    let metrics_for_callback = metrics_map.clone();
     let _sources_for_callback = sources.clone(); // Available for future use
 
     let start_source_fn: control::StartSourceFn = std::sync::Arc::new(move |index: usize, url: String, stop_signal: std::sync::Arc<std::sync::atomic::AtomicBool>| {
@@ -746,6 +774,7 @@ fn process_video() -> Result<()> {
         let data_dir = data_dir_for_callback.clone();
         let device = device_for_callback.clone();
         let overlays = overlays_for_callback.clone();
+        let metrics = metrics_for_callback.clone();
 
         thread::spawn(move || {
             info!("Starting processor for source {} ({})", index, source_display_name(&url));
@@ -756,6 +785,7 @@ fn process_video() -> Result<()> {
                 &data_dir,
                 device,
                 overlays,
+                metrics,
                 false,
                 Some(stop_signal),
             ) {
@@ -772,6 +802,7 @@ fn process_video() -> Result<()> {
         rtsp_config.clone(),
         source_manager.clone(),
         start_source_fn.clone(),
+        metrics_map.clone(),
     );
     info!("Control server started");
 

@@ -1,21 +1,34 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Hls from 'hls.js';
 
-const HLSVideo = ({ src, fallbackSrc, className, ...props }) => {
+const HLSVideo = ({
+  src,
+  fallbackSrc,
+  className = '',
+  ...props
+}) => {
   const videoRef = useRef(null);
   const hlsRef = useRef(null);
+
   const [useFallback, setUseFallback] = useState(false);
   const [error, setError] = useState(null);
 
+  /* ============================
+     MAIN STREAM SETUP
+  ============================ */
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !src) return;
 
-    // Reset state on src change
+    // Reset state on source change
     setUseFallback(false);
     setError(null);
 
-    // Check if it's an HLS stream
+    // Hard reset video element
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+
     const isHLS = src.endsWith('.m3u8') || src.includes('/hls/');
 
     if (isHLS) {
@@ -23,11 +36,15 @@ const HLSVideo = ({ src, fallbackSrc, className, ...props }) => {
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: true,
-          backBufferLength: 90,
-          maxBufferLength: 30,
-          maxMaxBufferLength: 600,
-          liveSyncDurationCount: 3,
-          liveMaxLatencyDurationCount: 10,
+
+          // Less aggressive buffering → better clarity
+          backBufferLength: 60,
+          maxBufferLength: 20,
+          liveSyncDurationCount: 2,
+          liveMaxLatencyDurationCount: 6,
+
+          // Avoid excessive level switching artifacts
+          capLevelToPlayerSize: true,
         });
 
         hlsRef.current = hls;
@@ -39,27 +56,30 @@ const HLSVideo = ({ src, fallbackSrc, className, ...props }) => {
           video.play().catch(() => {});
         });
 
-        hls.on(Hls.Events.ERROR, (event, data) => {
-          if (data.fatal) {
-            switch (data.type) {
-              case Hls.ErrorTypes.NETWORK_ERROR:
-                console.warn('HLS network error, attempting recovery...');
-                hls.startLoad();
-                break;
-              case Hls.ErrorTypes.MEDIA_ERROR:
-                console.warn('HLS media error, attempting recovery...');
-                hls.recoverMediaError();
-                break;
-              default:
-                console.error('Fatal HLS error:', data);
-                if (fallbackSrc) {
-                  setUseFallback(true);
-                } else {
-                  setError('Stream unavailable');
-                }
-                hls.destroy();
-                break;
-            }
+        hls.on(Hls.Events.ERROR, (_, data) => {
+          if (!data.fatal) return;
+
+          switch (data.type) {
+            case Hls.ErrorTypes.NETWORK_ERROR:
+              console.warn('[HLS] Network error → retrying');
+              hls.startLoad();
+              break;
+
+            case Hls.ErrorTypes.MEDIA_ERROR:
+              console.warn('[HLS] Media error → recovering');
+              hls.recoverMediaError();
+              break;
+
+            default:
+              console.error('[HLS] Fatal error', data);
+              hls.destroy();
+              hlsRef.current = null;
+
+              if (fallbackSrc) {
+                setUseFallback(true);
+              } else {
+                setError('STREAM UNAVAILABLE');
+              }
           }
         });
 
@@ -67,49 +87,77 @@ const HLSVideo = ({ src, fallbackSrc, className, ...props }) => {
           hls.destroy();
           hlsRef.current = null;
         };
-      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        // Native HLS support (Safari)
+      }
+
+      // Native HLS (Safari)
+      if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = src;
-        video.addEventListener('loadedmetadata', () => {
-          video.play().catch(() => {});
-        });
+        video.addEventListener(
+          'loadedmetadata',
+          () => video.play().catch(() => {}),
+          { once: true }
+        );
+        return;
+      }
+
+      // No HLS support at all
+      if (fallbackSrc) {
+        setUseFallback(true);
       } else {
-        // No HLS support, use fallback
-        if (fallbackSrc) {
-          setUseFallback(true);
-        } else {
-          setError('HLS not supported');
-        }
+        setError('HLS NOT SUPPORTED');
       }
     } else {
-      // Regular video file
+      // Regular MP4 / file stream
       video.src = src;
+      video.play().catch(() => {});
     }
   }, [src, fallbackSrc]);
 
-  // Handle fallback video
+  /* ============================
+     FALLBACK HANDLER
+  ============================ */
   useEffect(() => {
-    if (useFallback && fallbackSrc && videoRef.current) {
-      videoRef.current.src = fallbackSrc;
-      videoRef.current.play().catch(() => {});
-    }
+    if (!useFallback || !fallbackSrc || !videoRef.current) return;
+
+    const video = videoRef.current;
+    video.src = fallbackSrc;
+    video.play().catch(() => {});
   }, [useFallback, fallbackSrc]);
 
+  /* ============================
+     ERROR STATE (MINIMAL)
+  ============================ */
   if (error && !fallbackSrc) {
     return (
-      <div className={`flex items-center justify-center bg-black/50 ${className}`}>
-        <div className="text-center">
-          <div className="text-red-500 text-sm font-mono">{error}</div>
-          <div className="text-white/50 text-xs mt-1">Waiting for stream...</div>
+      <div
+        className={`flex items-center justify-center bg-black ${className}`}
+      >
+        <div className="text-center font-mono">
+          <div className="text-emerald-400 text-sm tracking-widest">
+            {error}
+          </div>
+          <div className="text-white/40 text-xs mt-1">
+            Awaiting signal…
+          </div>
         </div>
       </div>
     );
   }
 
+  /* ============================
+     VIDEO RENDER (REFINED)
+  ============================ */
   return (
     <video
       ref={videoRef}
-      className={className}
+      className={`
+        w-full h-full object-cover
+        iris-video
+        ${className}
+      `}
+      playsInline
+      muted
+      autoPlay
       {...props}
     />
   );
