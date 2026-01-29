@@ -84,7 +84,7 @@ const CameraAnalytics = ({ scale = 1, camIndex = 0, useCase, videoId }) => {
   const congestion = metrics?.congestion_index || 0;
   const density = metrics?.traffic_density || 0;
   const speed = Math.round(metrics?.mobility_index || 0);
-  const fps = metrics?.fps || 0;
+  // const fps = metrics?.fps || 0;
   const detections = metrics?.detection_count || 0;
 
   // Color based on congestion (higher = worse = red)
@@ -177,10 +177,10 @@ const CameraAnalytics = ({ scale = 1, camIndex = 0, useCase, videoId }) => {
               />
             </span>
           </div>
-          <div className="flex items-center justify-between gap-6">
+          {/* <div className="flex items-center justify-between gap-6">
             <span className="text-emerald-400 font-black text-sm tracking-wider">FPS</span>
             <span className="text-emerald-300 font-black text-2xl">{fps.toFixed(1)}</span>
-          </div>
+          </div> */}
           <div className="flex items-center justify-between gap-6">
             <span className="text-purple-400 font-black text-sm tracking-wider">OBJECTS</span>
             <span className="text-purple-300 font-black text-2xl">
@@ -195,10 +195,12 @@ const CameraAnalytics = ({ scale = 1, camIndex = 0, useCase, videoId }) => {
       </div>
 
       {/* Right-side Analytics */}
-      <div
-        className="absolute right-8 top-1/2 -translate-y-1/2 flex flex-col items-end gap-5 pointer-events-none origin-right"
-        style={{ transform: `scale(${scale})` }}
-      >
+<div
+  className="absolute right-8 top-[42%] -translate-y-1/2 flex flex-col items-end gap-6 pointer-events-none origin-right"
+  style={{ transform: `scale(${scale})` }}
+>
+
+
         {/* Congestion Index */}
         <div className="bg-black/50 backdrop-blur-md rounded-lg p-5 border border-emerald-500/30 text-right">
           <div className="text-sm text-emerald-400 font-mono font-bold tracking-wider mb-2">{config.secondary}</div>
@@ -244,10 +246,12 @@ const CameraAnalytics = ({ scale = 1, camIndex = 0, useCase, videoId }) => {
       </div>
 
       {/* Status Label */}
-      <div
-        className="absolute bottom-8 right-8 pointer-events-none origin-right z-10"
-        style={{ transform: `scale(${scale})` }}
-      >
+<div
+  className="absolute bottom-2 right-8 pointer-events-none origin-right z-10"
+  style={{ transform: `scale(${scale})` }}
+>
+
+
         <div className={`px-6 py-3 border-r-[8px] ${borderColor} bg-black/60 backdrop-blur-md transform skew-x-[-12deg] rounded-l-lg`}>
           <div className={`text-xl font-black uppercase tracking-[0.3em] ${color} skew-x-[12deg] drop-shadow-[0_0_10px_currentColor]`}>
             {config.statusLabel}: {status}
@@ -514,7 +518,7 @@ const VideoCell = ({
       <div className="resize-handle absolute right-0 top-4 bottom-4 w-2 cursor-e-resize z-40 hover:bg-emerald-500/20" onMouseDown={(e) => handleResizeStart(e, 'e')} />
 
       {/* Overlay toggles */}
-      <div className="no-drag absolute top-10 right-3 z-30 flex items-center gap-2 bg-black/60 border border-emerald-500/30 rounded-md px-2 py-1 backdrop-blur-sm">
+      <div className="no-drag absolute top-1 right-3 z-30 flex items-center gap-2 bg-black/60 border border-emerald-500/30 rounded-md px-2 py-1 backdrop-blur-sm">
         <button
           onClick={() => toggleOverlay('heatmap')}
           className={`text-[10px] font-mono font-bold uppercase px-2 py-1 rounded transition-all ${
