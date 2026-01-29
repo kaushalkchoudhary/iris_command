@@ -134,7 +134,7 @@ const Footer = ({ selectedVideos, onVideosChange, videos }) => {
           <div className="flex flex-col leading-none">
             <span className="text-[10px] text-white/40 tracking-wider">SYSTEM</span>
             <span className="font-bold tracking-widest text-emerald-400">
-              IRIS-TAC
+              IRIS
             </span>
           </div>
         </div>

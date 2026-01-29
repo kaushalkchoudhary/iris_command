@@ -148,7 +148,7 @@ const CameraAnalytics = ({ scale = 1, camIndex = 0, useCase, videoId }) => {
         style={{ transform: `scale(${scale})` }}
       >
         {/* Mobility Index */}
-        <div className="bg-black/50 backdrop-blur-md rounded-lg p-5 border border-emerald-500/30">
+        <div className="bg-black/70 backdrop-blur-md rounded-lg p-5 border border-emerald-500/30">
           <div className="text-sm text-emerald-400 font-mono font-bold tracking-wider mb-2">{config.primary}</div>
           <div
             className="text-7xl font-black font-mono drop-shadow-[0_0_20px_currentColor]"
@@ -163,7 +163,7 @@ const CameraAnalytics = ({ scale = 1, camIndex = 0, useCase, videoId }) => {
         </div>
 
         {/* Real-time Stats */}
-        <div className="font-mono flex flex-col gap-4 bg-black/50 backdrop-blur-md rounded-lg p-4 border border-white/10">
+        <div className="font-mono flex flex-col gap-4 bg-black/70 backdrop-blur-md rounded-lg p-4 border border-white/10">
           <div className="flex items-center justify-between gap-6">
             <span className="text-emerald-400 font-black text-sm tracking-wider">DENSITY</span>
             <span
@@ -202,7 +202,7 @@ const CameraAnalytics = ({ scale = 1, camIndex = 0, useCase, videoId }) => {
 
 
         {/* Congestion Index */}
-        <div className="bg-black/50 backdrop-blur-md rounded-lg p-5 border border-emerald-500/30 text-right">
+        <div className="bg-black/70 backdrop-blur-md rounded-lg p-5 border border-emerald-500/30 text-right">
           <div className="text-sm text-emerald-400 font-mono font-bold tracking-wider mb-2">{config.secondary}</div>
           <div
             className="text-7xl font-black font-mono drop-shadow-[0_0_20px_currentColor]"
