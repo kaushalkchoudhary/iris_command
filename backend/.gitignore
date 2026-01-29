@@ -1,0 +1,41 @@
+# Build artifacts
+/target
+/runs
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+*.log
+
+# Python
+/.venv
+__pycache__/
+*.py[cod]
+
+# Model files (large)
+*.engine
+*.onnx
+*.pt
+*.weights
+
+# Local config (contains credentials)
+# data/rtsp_links.yml
+
+# Logs
+*.log
+mediamtx.log
+
+# Database
+*.db
+*.sqlite
+
+# Temporary files
+*.tmp
+*.temp

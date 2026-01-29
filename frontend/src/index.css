@@ -1,0 +1,26 @@
+@import "tailwindcss";
+
+@layer utilities {
+  .perspective-1000 {
+    perspective: 1000px;
+  }
+
+  .rotate-y-2 {
+    transform: rotateY(2deg);
+  }
+
+  .hover\:rotate-y-0:hover {
+    transform: rotateY(0deg);
+  }
+}
+
+@layer base {
+  body {
+    background-color: black;
+    color: white;
+    overflow: hidden;
+    margin: 0;
+    padding: 0;
+    font-family: 'Inter', sans-serif;
+  }
+}

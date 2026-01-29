@@ -1,0 +1,73 @@
+# ===== OS =====
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ===== IDE & Editors =====
+.idea/
+.vscode/
+*.sublime-*
+.project
+.classpath
+.settings/
+
+# ===== Claude/AI =====
+.claude/
+.codex/
+.cursor/
+.gemini/
+
+# ===== Logs =====
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ===== Environment =====
+.env
+.env.local
+.env.*.local
+*.local
+
+# ===== Backend (Rust) =====
+backend/target/
+backend/runs/
+backend/*.log
+backend/*.db
+backend/*.sqlite
+
+# Large model files (download separately)
+backend/data/*.engine
+backend/data/*.onnx
+backend/data/*.pt
+backend/data/*.weights
+
+# ===== Frontend (Node) =====
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.cache/
+frontend/*.tsbuildinfo
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+ENV/
+
+# ===== Temporary =====
+*.tmp
+*.temp
+*.bak
+*.backup
