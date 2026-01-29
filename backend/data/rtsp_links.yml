@@ -13,7 +13,7 @@ rtsp_links:
 - rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone12
 active_sources: []
 overlays:
-  bcpdrone11:
+  bcpdrone9:
     heatmap: true
-    trails: false
-    bboxes: false
+    trails: true
+    bboxes: true

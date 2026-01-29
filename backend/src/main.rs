@@ -149,6 +149,14 @@ fn process_source(
     info!("[{}] Database opened: {}", source_label, out_dir.join("analytics.db").display());
 
     let mut inference_device = base_device;
+    let engine_path = data_dir.join("yolov11n-visdrone.engine");
+    if engine_path.exists() && !cfg!(feature = "trt_engine") {
+        return Err(anyhow!(
+            "TensorRT engine found at {} but binary was built without `trt_engine` feature",
+            engine_path.display()
+        ));
+    }
+
 
     #[cfg(feature = "trt_engine")]
     let (model_path, mut trt_model) = {
@@ -202,7 +210,12 @@ fn process_source(
 
         let onnx_path = data_dir.join("yolov11n-visdrone.onnx");
         let model_path = onnx_path.clone();
-        info!("[{}] Model path: {}", source_label, model_path.display());
+        warn!(
+            "[{}] TensorRT not available; falling back to ONNX model at {}",
+            source_label,
+            model_path.display()
+        );
+
 
         if !model_path.exists() {
             error!("[{}] Model file not found: {}", source_label, model_path.display());
@@ -251,11 +264,11 @@ fn process_source(
         (model_path, model)
     };
 
-    let uses_engine = model_path
-        .extension()
+    let uses_engine = cfg!(feature = "trt_engine") && model_path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.eq_ignore_ascii_case("engine"))
         .unwrap_or(false);
+
     let model_kind = if uses_engine {
         "TensorRT engine"
     } else {

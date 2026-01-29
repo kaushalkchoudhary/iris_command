@@ -252,7 +252,7 @@ const CameraAnalytics = ({ scale = 1, camIndex = 0, useCase, videoId }) => {
 >
 
 
-        <div className={`px-6 py-3 border-r-[8px] ${borderColor} bg-black/60 backdrop-blur-md transform skew-x-[-12deg] rounded-l-lg`}>
+        <div className={`px-6 py-3 border-r-[8px] ${borderColor} bg-black/80 backdrop-blur-md transform skew-x-[-12deg] rounded-l-lg`}>
           <div className={`text-xl font-black uppercase tracking-[0.3em] ${color} skew-x-[12deg] drop-shadow-[0_0_10px_currentColor]`}>
             {config.statusLabel}: {status}
           </div>

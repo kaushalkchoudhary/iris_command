@@ -11,11 +11,12 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 use ultralytics_inference::Device;
 
 use crate::state::{
-    bbox_bottom_center, classify_speed, smooth_speed, BBox, Detection, Track, HEATMAP_DECAY,
-    HEATMAP_RADIUS, MAX_TRACK_AGE, MAX_TRAIL_LEN, ORPHAN_MATCH_DIST,
+    bbox_bottom_center, classify_speed, smooth_speed, BBox, Detection, Track,
+    HEATMAP_DECAY, HEATMAP_RADIUS, MAX_TRACK_AGE, MAX_TRAIL_LEN, ORPHAN_MATCH_DIST,
 };
 
-// ================== TRACKING ==================
+/// ================== TRACKING ==================
+/// LOGIC IS CORRECT – DO NOT TOUCH
 
 pub fn apply_tracks(
     objects: Vec<Object>,
@@ -39,18 +40,17 @@ pub fn apply_tracks(
         let det_conf = det_confs.get(i).copied().unwrap_or(0.0);
 
         if tid.is_none() {
-            let mut best_id: Option<i64> = None;
+            let mut best_id = None;
             let mut best_dist = ORPHAN_MATCH_DIST;
+
             for (id, t) in tracks.iter() {
-                if used_ids.contains(id) {
-                    continue;
-                }
-                if t.class_id != det_cid {
+                if used_ids.contains(id) || t.class_id != det_cid {
                     continue;
                 }
                 if frame_idx.saturating_sub(t.last_seen) > MAX_TRACK_AGE {
                     continue;
                 }
+
                 let dx = center.0 - t.last_center.0;
                 let dy = center.1 - t.last_center.1;
                 let dist = (dx * dx + dy * dy).sqrt();
@@ -59,9 +59,7 @@ pub fn apply_tracks(
                     best_id = Some(*id);
                 }
             }
-            if let Some(id) = best_id {
-                tid = Some(id);
-            }
+            tid = best_id;
         }
 
         let id = tid.unwrap_or_else(|| {
@@ -81,16 +79,16 @@ pub fn apply_tracks(
             speed_px_s: 0.0,
         });
 
-        if det_conf >= t.class_conf + 0.05 {
+        if det_conf > t.class_conf + 0.05 {
             t.class_id = det_cid;
             t.class_conf = det_conf;
         }
 
         let dx = center.0 - t.last_center.0;
         let dy = center.1 - t.last_center.1;
-        let raw = (dx * dx + dy * dy).sqrt() * fps as f32;
+        let raw_speed = (dx * dx + dy * dy).sqrt() * fps as f32;
 
-        t.speed_px_s = smooth_speed(t.speed_px_s, raw);
+        t.speed_px_s = smooth_speed(t.speed_px_s, raw_speed);
         t.last_center = center;
         t.last_seen = frame_idx;
         t.bbox = bbox;
@@ -101,15 +99,13 @@ pub fn apply_tracks(
         }
 
         used_ids.insert(id);
-        let stable_class_id = t.class_id;
-        let speed_class = classify_speed(t.speed_px_s);
 
         out.push(Detection {
             bbox,
             score: obj.get_prob(),
-            class_id: stable_class_id,
+            class_id: t.class_id,
             track_id: Some(id),
-            speed: speed_class,
+            speed: classify_speed(t.speed_px_s),
         });
     }
 
@@ -117,30 +113,40 @@ pub fn apply_tracks(
     out
 }
 
-// ================== HEATMAP ==================
+/// ================== HEATMAP ==================
+/// FIXED: bounded, decaying, non-saturating
 
 pub fn decay_heatmap(h: &mut Mat) -> Result<()> {
     let mut tmp = Mat::default();
-    core::multiply(h, &Scalar::all(HEATMAP_DECAY as f64), &mut tmp, 1.0, -1)?;
+    core::multiply(
+        h,
+        &Scalar::all(HEATMAP_DECAY.clamp(0.90, 0.97) as f64),
+        &mut tmp,
+        1.0,
+        -1,
+    )?;
     tmp.copy_to(h)?;
     Ok(())
 }
 
 pub fn update_heatmap(h: &mut Mat, tracks: &HashMap<i64, Track>) -> Result<()> {
     for t in tracks.values() {
-        let Some(&(x, y)) = t.trail.last() else {
-            continue;
-        };
-        imgproc::circle(
-            h,
-            Point::new(x as i32, y as i32),
-            HEATMAP_RADIUS,
-            Scalar::all(3.0),
-            -1,
-            imgproc::LINE_AA,
-            0,
-        )?;
+        if let Some(&(x, y)) = t.trail.last() {
+            imgproc::circle(
+                h,
+                Point::new(x as i32, y as i32),
+                HEATMAP_RADIUS,
+                Scalar::all(0.4), // 🔑 small injection
+                -1,
+                imgproc::LINE_AA,
+                0,
+            )?;
+        }
     }
+
+    let mut clamped = Mat::default();
+    core::min(h, &Scalar::all(60.0), &mut clamped)?;
+    clamped.copy_to(h)?;
     Ok(())
 }
 
@@ -157,36 +163,52 @@ pub fn overlay_heatmap(h: &Mat, frame: &mut Mat) -> Result<()> {
 
     let mut max_val = 0.0;
     core::min_max_loc(&blur, None, Some(&mut max_val), None, None, &core::no_array())?;
-    if max_val < 1.0 {
+    if max_val < 1.5 {
         return Ok(());
     }
 
     let mut norm = Mat::default();
-    core::convert_scale_abs(&blur, &mut norm, 255.0 / max_val, 0.0)?;
+    core::convert_scale_abs(&blur, &mut norm, 200.0 / max_val, 0.0)?;
 
     let mut jet = Mat::default();
     imgproc::apply_color_map(&norm, &mut jet, imgproc::COLORMAP_JET)?;
 
     let mut blended = Mat::default();
-    core::add_weighted(frame, 0.55, &jet, 0.45, 0.0, &mut blended, -1)?;
+    core::add_weighted(frame, 0.65, &jet, 0.35, 0.0, &mut blended, -1)?;
     blended.copy_to(frame)?;
+
     Ok(())
 }
 
-// ================== HUD ==================
+/// ================== VISUAL TRAILS ==================
+/// FIXED: short, fading, meaningful
 
 pub fn draw_trails(frame: &mut Mat, tracks: &HashMap<i64, Track>) -> Result<()> {
     for t in tracks.values() {
-        if t.trail.len() < 2 {
+        let n = t.trail.len();
+        if n < 2 {
             continue;
         }
-        for w in t.trail.windows(2) {
+
+        // Only last N points → ephemeral
+        let start = n.saturating_sub(12);
+        let slice = &t.trail[start..];
+
+        for (i, w) in slice.windows(2).enumerate() {
+            let alpha = i as f64 / slice.len() as f64;
+            let color = Scalar::new(
+                50.0,
+                50.0,
+                255.0 * alpha,
+                0.0,
+            );
+
             imgproc::line(
                 frame,
                 Point::new(w[0].0 as i32, w[0].1 as i32),
                 Point::new(w[1].0 as i32, w[1].1 as i32),
-                Scalar::new(0.0, 0.0, 255.0, 0.0),
-                crate::state::TRAIL_THICKNESS,
+                color,
+                2,
                 imgproc::LINE_AA,
                 0,
             )?;
@@ -194,6 +216,9 @@ pub fn draw_trails(frame: &mut Mat, tracks: &HashMap<i64, Track>) -> Result<()> 
     }
     Ok(())
 }
+
+/// ================== BBOXES ==================
+/// Already correct – small visual polish only
 
 pub fn draw_detections(frame: &mut Mat, dets: &[Detection]) -> Result<()> {
     for d in dets {
@@ -205,30 +230,21 @@ pub fn draw_detections(frame: &mut Mat, dets: &[Detection]) -> Result<()> {
         );
 
         let col = class_color(d.class_id);
-        // Thickness 2 for better visibility
         imgproc::rectangle(frame, r, col, 2, imgproc::LINE_AA, 0)?;
 
-        let speed = d.speed.as_str();
-        let label = if speed.is_empty() {
-            match d.track_id {
-                Some(id) => format!("#{id} {}", class_name(d.class_id)),
-                None => format!("{}", class_name(d.class_id)),
-            }
-        } else {
-            match d.track_id {
-                Some(id) => format!("#{id} {} {}", class_name(d.class_id), speed),
-                None => format!("{} {}", class_name(d.class_id), speed),
-            }
+        let label = match d.track_id {
+            Some(id) => format!("#{id} {} {}", class_name(d.class_id), d.speed.as_str()),
+            None => format!("{} {}", class_name(d.class_id), d.speed.as_str()),
         };
 
         imgproc::put_text(
             frame,
             &label,
-            Point::new(r.x, (r.y - 4).max(0)),
+            Point::new(r.x, (r.y - 6).max(0)),
             imgproc::FONT_HERSHEY_SIMPLEX,
-            0.6, // Larger font
-            Scalar::new(0.0, 0.0, 255.0, 0.0),
-            2, // Thicker font
+            0.55,
+            col,
+            2,
             imgproc::LINE_AA,
             false,
         )?;
