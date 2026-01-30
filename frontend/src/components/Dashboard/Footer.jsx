@@ -1,8 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import clsx from 'clsx';
-import { Radio, Wifi, Clock, Drone, Gauge, Timer, Signal, Activity, Zap } from 'lucide-react';
+import { Activity, Globe, Wifi } from 'lucide-react';
 
-const API_BASE_URL = import.meta.env.DEV ? '/api' : `http://${window.location.hostname}:9010`;
+const API_BASE_URL = import.meta.env.DEV
+  ? '/api'
+  : `http://${window.location.hostname}:9010`;
 
 const DRONE_REGION_MAP = {
   bcpdrone1: 'MG Road Junction',
@@ -19,287 +21,290 @@ const DRONE_REGION_MAP = {
   bcpdrone12: 'JP Nagar Phase 6',
 };
 
-const Footer = ({ selectedVideos, onVideosChange, videos, onRefresh }) => {
-  const [time, setTime] = useState(() =>
-    new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
+  /* ============================
+     CLOCK
+  ============================ */
+  const [currentTime, setCurrentTime] = useState(
+    new Date().toLocaleTimeString()
   );
-  const [date, setDate] = useState(() =>
-    new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }).toUpperCase()
-  );
-
-  // Real-time performance metrics
-  const [fps, setFps] = useState(0);
-  const [latency, setLatency] = useState(42);
-  const [bandwidth, setBandwidth] = useState(0);
-  const [signalStrength, setSignalStrength] = useState(0);
-
-  // Auto-refresh sources every 5 seconds to sync uploads
-  useEffect(() => {
-    if (onRefresh) {
-      const interval = setInterval(onRefresh, 5000);
-      return () => clearInterval(interval);
-    }
-  }, [onRefresh]);
 
   useEffect(() => {
-    const t = setInterval(() => {
-      const now = new Date();
-      setTime(now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }));
-      setDate(now.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }).toUpperCase());
-    }, 1000);
+    const t = setInterval(
+      () => setCurrentTime(new Date().toLocaleTimeString()),
+      1000
+    );
     return () => clearInterval(t);
   }, []);
 
-  // Fetch real FPS from backend metrics API
+  /* ============================
+     METRICS (REAL API)
+  ============================ */
+  const [fps, setFps] = useState(null);
+  const [latency, setLatency] = useState(null);
+  const [bandwidth, setBandwidth] = useState(null);
+
   useEffect(() => {
-    const fetchMetrics = async () => {
+    let timer;
+
+    const pollMetrics = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/metrics`);
-        if (response.ok) {
-          const data = await response.json();
-          // Calculate average FPS across all selected videos
-          const selectedIds = selectedVideos.map(v => v.id);
-          let totalFps = 0;
-          let count = 0;
-          for (const [sourceName, metrics] of Object.entries(data)) {
-            if (selectedIds.includes(sourceName) && metrics.fps !== undefined) {
-              totalFps += metrics.fps;
-              count++;
-            }
+        const res = await fetch(`${API_BASE_URL}/metrics`);
+        if (!res.ok) return;
+
+        const data = await res.json();
+        const ids = selectedVideos.map(v => v.id);
+
+        let fpsSum = 0;
+        let fpsCount = 0;
+        let latencySum = 0;
+        let bwSum = 0;
+        let bwCount = 0;
+
+        Object.entries(data).forEach(([id, m]) => {
+          if (!ids.includes(id)) return;
+
+          if (typeof m.fps === 'number') {
+            fpsSum += m.fps;
+            fpsCount++;
           }
-          if (count > 0) {
-            setFps(totalFps / count);
+          if (typeof m.latency_ms === 'number') {
+            latencySum += m.latency_ms;
           }
-        }
+          if (typeof m.bandwidth_mb === 'number') {
+            bwSum += m.bandwidth_mb;
+            bwCount++;
+          }
+        });
+
+        setFps(fpsCount ? fpsSum / fpsCount : null);
+        setLatency(fpsCount ? latencySum / fpsCount : null);
+        setBandwidth(bwCount ? bwSum : null);
       } catch (e) {
-        console.error('Failed to fetch metrics for FPS:', e);
+        console.error('metrics fetch failed', e);
       }
     };
 
-    fetchMetrics();
-    const interval = setInterval(fetchMetrics, 2000);
-    return () => clearInterval(interval);
+    pollMetrics();
+    timer = setInterval(pollMetrics, 2000);
+    return () => clearInterval(timer);
   }, [selectedVideos]);
 
-  // Simulate other performance metrics (latency, bandwidth, signal)
+  /* ============================
+     AUTO REFRESH SOURCES
+  ============================ */
   useEffect(() => {
-    const interval = setInterval(() => {
-      setLatency(prev => Math.max(28, Math.min(85, prev + (Math.random() - 0.5) * 8)));
-      setBandwidth(prev => Math.max(12.5, Math.min(48.2, prev + (Math.random() - 0.5) * 2.5)));
-      setSignalStrength(prev => Math.max(65, Math.min(98, prev + (Math.random() - 0.5) * 10)));
-    }, 2000);
-    return () => clearInterval(interval);
-  }, []);
+    if (!onRefresh) return;
+    const i = setInterval(onRefresh, 5000);
+    return () => clearInterval(i);
+  }, [onRefresh]);
 
-  const availableVideos = Array.isArray(videos) ? videos : [];
-  const total = availableVideos.length;
-  const activeCount = useMemo(() => selectedVideos?.length || 0, [selectedVideos]);
-
-  // Pre-calculate mapping for "UP 1", "UP 2"
+  /* ============================
+     CAMERA LABELS (OLD LOGIC)
+  ============================ */
   const uploadedMap = useMemo(() => {
     const map = {};
-    let count = 0;
-    availableVideos.forEach(v => {
+    let c = 0;
+    videos.forEach(v => {
       if (v.label === 'UPLOADED') {
-        count++;
-        map[v.id] = `UP ${count}`;
+        c++;
+        map[v.id] = `UP ${c}`;
       }
     });
     return map;
-  }, [availableVideos]);
+  }, [videos]);
 
-  const toggleVideo = (video) => {
-    const isSelected = selectedVideos.some(v => v.id === video.id);
-    if (isSelected) {
+  const toggleVideo = async (video) => {
+    const active = selectedVideos.some(v => v.id === video.id);
+    if (active) {
       if (selectedVideos.length === 1) return;
       onVideosChange(selectedVideos.filter(v => v.id !== video.id));
+
+      // Stop inference on backend
+      try {
+        await fetch(`${API_BASE_URL}/sources/stop`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ index: video.droneIndex }),
+        });
+      } catch (e) { console.error('Stop failed', e); }
+
     } else {
       onVideosChange([...selectedVideos, video]);
+
+      // Start inference on backend
+      try {
+        await fetch(`${API_BASE_URL}/sources/start`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ index: video.droneIndex }),
+        });
+      } catch (e) { console.error('Start failed', e); }
     }
   };
 
-  const isSelected = (id) => selectedVideos.some(v => v.id === id);
+  const isSelected = (id) =>
+    selectedVideos.some(v => v.id === id);
 
-  // Signal strength color
-  const getSignalColor = (strength) => {
-    if (strength >= 80) return 'text-emerald-400';
-    if (strength >= 60) return 'text-yellow-400';
-    return 'text-orange-400';
+  /* ============================
+     UPLOAD LOGIC
+  ============================ */
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadMessage, setUploadMessage] = useState(null);
+
+  const uploadFile = async (file) => {
+    if (!file) return;
+    setIsUploading(true);
+    setUploadProgress(0);
+    setUploadMessage(null);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${API_BASE_URL}/upload?filename=${encodeURIComponent(file.name)}`);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        setUploadProgress((e.loaded / e.total) * 100);
+      }
+    };
+
+    xhr.onload = () => {
+      setIsUploading(false);
+      if (xhr.status === 200) {
+        setUploadMessage({ type: 'success', text: 'UPLOADED' });
+        setTimeout(() => setUploadMessage(null), 3000);
+      } else {
+        setUploadMessage({ type: 'error', text: 'FAILED' });
+        setTimeout(() => setUploadMessage(null), 3000);
+      }
+    };
+
+    xhr.onerror = () => {
+      setIsUploading(false);
+      setUploadMessage({ type: 'error', text: 'ERROR' });
+      setTimeout(() => setUploadMessage(null), 3000);
+    };
+
+    xhr.send(file);
   };
 
-  // FPS color based on performance
-  const getFpsColor = (fps) => {
-    if (fps === 0) return 'text-white/40';
-    if (fps >= 25) return 'text-emerald-400';
-    if (fps >= 15) return 'text-yellow-400';
-    return 'text-orange-400';
-  };
-
-  // Latency color
-  const getLatencyColor = (lat) => {
-    if (lat <= 50) return 'text-emerald-400';
-    if (lat <= 75) return 'text-yellow-400';
-    return 'text-orange-400';
-  };
-
+  /* ============================
+     RENDER
+  ============================ */
   return (
-    <footer className="w-full h-10 bg-black/90 backdrop-blur-xl border-t border-emerald-500/20 flex items-center px-4 font-mono text-xs z-50 shadow-[0_-2px_20px_rgba(16,185,129,0.1)]">
-
-      {/* LEFT: SYSTEM ID + STATUS */}
-      <div className="flex items-center gap-4">
+    <div className="w-full h-12 bg-black/60 border-t border-cyan-500/30 flex items-center justify-between px-6 z-50 font-mono">
+      {/* ===== LEFT: SYSTEM STATUS ===== */}
+      <div className="flex items-center gap-6">
         <div className="flex items-center gap-2">
-          <div className="relative">
-            <Radio className="w-4 h-4 text-emerald-400" strokeWidth={2} />
-            <div className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
-          </div>
-          <div className="flex flex-col leading-none">
-            <span className="text-[10px] text-white/40 tracking-wider">SYSTEM</span>
-            <span className="font-bold tracking-widest text-emerald-400">
-              IRIS
-            </span>
-          </div>
+          <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
+          <span className="text-[10px] text-emerald-500 font-bold uppercase tracking-[0.2em]">
+            Network: Online
+          </span>
         </div>
 
-        <div className="h-6 w-px bg-white/10" />
-
-        <div className="flex items-center gap-1.5">
-          <span className="relative flex h-2 w-2">
-            <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-400/40 animate-ping" />
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-400" />
+        <div className="flex items-center gap-2 border-l border-white/10 pl-6">
+          <Globe className="w-3 h-3 text-cyan-500/60" />
+          <span className="text-[10px] text-cyan-500/60 uppercase tracking-widest">
+            Nodes: {selectedVideos.length}/{videos.length.toString().padStart(2, '0')}
           </span>
-          <div className="flex flex-col leading-none">
-            <span className="text-[9px] text-white/40">STATUS</span>
-            <span className="text-emerald-400 font-semibold tracking-wide">ONLINE</span>
-          </div>
+        </div>
+
+        <div className="flex items-center gap-2 border-l border-white/10 pl-6">
+          <Activity className="w-3 h-3 text-cyan-500/60" />
+          <span className="text-[10px] text-cyan-500/60 uppercase tracking-widest">
+            Feed: Active
+          </span>
         </div>
       </div>
 
-      {/* CENTER: DRONE SELECTOR - TACTICAL LAYOUT */}
-      <div className="flex-1 flex items-center justify-center">
-        <div className="flex items-center gap-1 px-3 py-1 bg-white/[0.02] border border-white/5 rounded">
-          <span className="text-[10px] text-white/40 tracking-wider mr-2">UNITS</span>
-          {availableVideos.map((vid, idx) => {
-            const selected = isSelected(vid.id);
-            const label = vid.label === 'UPLOADED' ? (uploadedMap[vid.id] || 'UP') : String(idx + 1).padStart(2, '0');
+      {/* ===== CENTER: CAMERA SELECTOR & UPLOADER ===== */}
+      <div className="flex items-center gap-4">
+        <div className="flex items-center gap-1 border border-white/10 px-1 py-0.5">
+          {videos.map((vid, idx) => {
+            const label =
+              vid.label === 'UPLOADED'
+                ? uploadedMap[vid.id] || 'UP'
+                : vid.label || `CAM ${idx + 1}`;
 
             return (
-              <div key={vid.id} className="relative group">
-                <button
-                  onClick={() => toggleVideo(vid)}
-                  className={clsx(
-                    'relative flex items-center justify-center min-w-[2.25rem] h-6 px-1.5 transition-all border',
-                    selected
-                      ? 'bg-emerald-500/20 border-emerald-500/60 text-emerald-400'
-                      : 'bg-white/[0.02] border-white/10 text-white/40 hover:border-white/30 hover:text-white/70'
-                  )}
-                >
-                  {/* ACTIVE INDICATOR */}
-                  {selected && (
-                    <div className="absolute top-0 left-0 right-0 h-[2px] bg-emerald-400" />
-                  )}
-
-                  <span className="font-bold text-[9px] tracking-wider uppercase">
-                    {label}
-                  </span>
-                </button>
-
-                {/* TACTICAL TOOLTIP */}
-                <div className="pointer-events-none absolute bottom-full mb-2 left-1/2 -translate-x-1/2
-                opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-                  <div className="px-2 py-1 bg-black/95 border border-emerald-500/30
-                  text-[10px] text-emerald-400 whitespace-nowrap
-                  tracking-wider backdrop-blur-sm">
-
-                    {/* REGION — SAME AS RIGHT PANEL */}
-                    <div className="font-bold text-emerald-400">
-                      {DRONE_REGION_MAP[vid.id] || (vid.label === 'UPLOADED' ? 'FILE FEED' : 'UNKNOWN REGION')}
-                    </div>
-
-                    {/* DRONE LABEL — SECONDARY */}
-                    <div className="mt-0.5 text-[9px] text-white/50 tracking-widest">
-                      {vid.label}
-                    </div>
-                  </div>
-
-                  {/* ARROW */}
-                  <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-px">
-                    <div className="border-4 border-transparent border-t-emerald-500/30" />
-                  </div>
-                </div>
-
-              </div>
+              <button
+                key={vid.id}
+                onClick={() => toggleVideo(vid)}
+                className={clsx(
+                  'px-3 py-1 text-[10px] uppercase tracking-wider font-bold transition-colors',
+                  isSelected(vid.id)
+                    ? 'bg-cyan-500 text-black'
+                    : 'text-white/40 hover:text-white/70'
+                )}
+                title={DRONE_REGION_MAP[vid.id] || label}
+              >
+                {label}
+              </button>
             );
           })}
         </div>
-      </div>
 
-      {/* RIGHT: TECHNICAL METRICS */}
-      <div className="flex items-center gap-4">
-        {/* Performance Metrics */}
-        <div className="flex items-center gap-3">
-          <div className="flex flex-col items-end leading-none">
-            <span className="text-[9px] text-white/40 tracking-wider">FRAMERATE</span>
-            <div className="flex items-center gap-1">
-              <Activity className="w-3 h-3 text-white/30" strokeWidth={1.5} />
-              <span className={clsx('font-bold tabular-nums', getFpsColor(fps))}>
-                {fps > 0 ? fps.toFixed(0) : '--'}
+        {/* Tactical Uploader Small UI */}
+        <div className="relative group">
+          <input
+            type="file"
+            accept=".mp4,.mkv,.asf"
+            className="absolute inset-0 opacity-0 cursor-pointer z-10"
+            onChange={(e) => uploadFile(e.target.files[0])}
+            disabled={isUploading}
+          />
+          <div className={clsx(
+            "px-4 py-1 border border-cyan-500/30 text-[10px] font-black uppercase tracking-[0.2em] transition-all duration-300 flex items-center gap-2",
+            isUploading ? "bg-cyan-500/20" : "hover:bg-cyan-500 hover:text-black cursor-pointer shadow-[0_0_10px_rgba(6,182,212,0.1)] hover:shadow-[0_0_15px_rgba(6,182,212,0.3)]"
+          )}>
+            {isUploading ? (
+              <div className="flex items-center gap-2">
+                <div className="w-12 h-1 bg-white/10 overflow-hidden relative">
+                  <div className="absolute inset-0 bg-cyan-400" style={{ width: `${uploadProgress}%` }} />
+                </div>
+                <span className="text-cyan-400">{Math.round(uploadProgress)}%</span>
+              </div>
+            ) : uploadMessage ? (
+              <span className={uploadMessage.type === 'success' ? 'text-emerald-500' : 'text-red-500'}>
+                {uploadMessage.text}
               </span>
-              <span className="text-white/40 text-[10px]">FPS</span>
-            </div>
-          </div>
-
-          <div className="flex flex-col items-end leading-none">
-            <span className="text-[9px] text-white/40 tracking-wider">LATENCY</span>
-            <div className="flex items-center gap-1">
-              <Zap className="w-3 h-3 text-white/30" strokeWidth={1.5} />
-              <span className={clsx('font-bold tabular-nums', getLatencyColor(latency))}>
-                {latency.toFixed(0)}
-              </span>
-              <span className="text-white/40 text-[10px]">MS</span>
-            </div>
-          </div>
-
-          <div className="flex flex-col items-end leading-none">
-            <span className="text-[9px] text-white/40 tracking-wider">BANDWIDTH</span>
-            <div className="flex items-center gap-1">
-              <Signal className="w-3 h-3 text-white/30" strokeWidth={1.5} />
-              <span className="font-bold text-cyan-400 tabular-nums">
-                {bandwidth.toFixed(1)}
-              </span>
-              <span className="text-white/40 text-[10px]">MB/S</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="h-6 w-px bg-white/10" />
-
-        {/* Connection Status */}
-        <div className="flex flex-col items-end leading-none">
-          <span className="text-[9px] text-white/40 tracking-wider">SIGNAL</span>
-          <div className="flex items-center gap-1">
-            <Wifi className="w-3 h-3 text-white/30" strokeWidth={1.5} />
-            <span className={clsx('font-bold tabular-nums', getSignalColor(signalStrength))}>
-              {signalStrength.toFixed(0)}%
-            </span>
-            <span className="text-white/40">({activeCount}/{total})</span>
-          </div>
-        </div>
-
-        <div className="h-6 w-px bg-white/10" />
-
-        {/* Time Display */}
-        <div className="flex flex-col items-end leading-none">
-          <span className="text-[9px] text-white/40 tracking-wider">{date}</span>
-          <div className="flex items-center gap-1">
-            <Clock className="w-3 h-3 text-white/30" strokeWidth={1.5} />
-            <span className="text-emerald-400 font-bold tracking-wider tabular-nums">
-              {time}
-            </span>
-            <span className="text-white/40 text-[10px]">UTC</span>
+            ) : (
+              <span>Upload_Feed</span>
+            )}
           </div>
         </div>
       </div>
-    </footer>
+
+      {/* ===== RIGHT: DIAGNOSTICS ===== */}
+      <div className="flex items-center gap-6">
+        <div className="flex items-center gap-2">
+          <Activity className="w-3 h-3 text-cyan-500/60" />
+          <span className="text-[10px] text-cyan-500/80">
+            {fps !== null ? fps.toFixed(0) : '--'} FPS
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2 border-l border-white/10 pl-6">
+          <span className="text-[10px] text-white/30 uppercase tracking-widest">
+            Latency: {latency !== null ? latency.toFixed(0) : '--'}ms
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2 border-l border-white/10 pl-6">
+          <span className="text-[10px] text-cyan-500/80">
+            {currentTime}
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2 border-l border-white/10 pl-6">
+          <Wifi className="w-3 h-3 text-white/20" />
+          <span className="text-[10px] text-white/20">
+            {bandwidth !== null ? bandwidth.toFixed(1) : '--'} MB/s
+          </span>
+        </div>
+      </div>
+    </div>
   );
 };
 

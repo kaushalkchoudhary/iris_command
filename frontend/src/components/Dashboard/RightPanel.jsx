@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X } from 'lucide-react';
+import { AlertTriangle, AlertCircle, Info, XCircle, X } from 'lucide-react';
+import clsx from 'clsx';
 import WebRTCVideo from '../UI/WebRTCVideo';
 
 /* ============================
@@ -11,7 +12,7 @@ const WEBRTC_BASE_URL = import.meta.env.DEV
   : `http://${window.location.hostname}:8889`;
 
 /* ============================
-   DRONE FEEDS
+   DRONE → LOCATION MAP
 ============================ */
 const DRONE_REGION_MAP = {
   bcpdrone1: 'MG Road Junction',
@@ -28,178 +29,152 @@ const DRONE_REGION_MAP = {
   bcpdrone12: 'JP Nagar Phase 6',
 };
 
-const RightPanel = ({ sources = [] }) => {
-  const [selectedFeed, setSelectedFeed] = useState(null);
+/* ============================
+   ALERT TEMPLATES (NEW LOGIC)
+============================ */
+const ALERT_TEMPLATES = {
+  traffic: [
+    { severity: 'critical', reason: 'Major accident detected', icon: XCircle },
+    { severity: 'high', reason: 'Road obstruction reported', icon: AlertTriangle },
+    { severity: 'medium', reason: 'Congestion building up', icon: AlertCircle },
+    { severity: 'low', reason: 'Minor slowdown observed', icon: Info },
+  ],
+  crowd: [
+    { severity: 'critical', reason: 'Density exceeded safety limit', icon: XCircle },
+    { severity: 'high', reason: 'Crowd bottleneck forming', icon: AlertTriangle },
+    { severity: 'medium', reason: 'Rapid density increase', icon: AlertCircle },
+  ],
+  safety: [
+    { severity: 'critical', reason: 'Unattended object detected', icon: XCircle },
+    { severity: 'high', reason: 'Restricted zone intrusion', icon: AlertTriangle },
+  ],
+  perimeter: [
+    { severity: 'critical', reason: 'Fence breach detected', icon: XCircle },
+    { severity: 'high', reason: 'Unauthorized movement detected', icon: AlertTriangle },
+  ],
+};
+
+const severityColor = (severity) => {
+  switch (severity) {
+    case 'critical': return 'text-red-400';
+    case 'high': return 'text-orange-400';
+    case 'medium': return 'text-yellow-400';
+    default: return 'text-cyan-400';
+  }
+};
+
+const RightPanel = ({ useCase = 'traffic', sources = [] }) => {
+  const [selectedAlert, setSelectedAlert] = useState(null);
+
+  /* ============================
+     BUILD ALERTS FROM SOURCES
+  ============================ */
+  const alerts = useMemo(() => {
+    const templates = ALERT_TEMPLATES[useCase] || ALERT_TEMPLATES.traffic;
+
+    return sources.map((src, i) => {
+      const template = templates[i % templates.length];
+      return {
+        id: src.id,
+        stream: src.stream,
+        label: src.label,
+        location: DRONE_REGION_MAP[src.id] || 'Remote Stream',
+        severity: template.severity,
+        reason: template.reason,
+        icon: template.icon,
+        time: `${Math.floor(Math.random() * 20) + 1}m ago`,
+      };
+    });
+  }, [sources, useCase]);
 
   return (
     <>
-      {/* RIGHT PANEL */}
+      {/* ================= PANEL ================= */}
       <motion.div
-        initial={{ x: 32, opacity: 0 }}
+        initial={{ x: 40, opacity: 0 }}
         animate={{ x: 0, opacity: 1 }}
-        transition={{ duration: 0.5, ease: 'easeOut' }}
-        className="
-          w-[360px] h-full
-          bg-[#070b14]/90 backdrop-blur-xl
-          border-l border-emerald-500/15
-          flex flex-col z-40 font-mono
-        "
+        className="w-[320px] h-full bg-[#070b14]/80 border-l border-white/10 flex flex-col z-40"
       >
-        {/* HEADER */}
-        <div className="px-6 py-4 border-b border-emerald-500/15">
-          <span className="text-[10px] text-emerald-400/60 uppercase tracking-[0.35em] font-bold">
-            Sensor Stream
-          </span>
-          <h1 className="mt-1 text-2xl font-black text-emerald-400 tracking-widest">
-            LIVE FEEDS
-          </h1>
+        {/* HEADER — OLD STYLE */}
+        <div className="p-4 border-b border-white/10">
+          <div className="text-[10px] text-cyan-500/60 font-black uppercase tracking-[0.4em]">
+            Intelligence Stream
+          </div>
+          <div className="text-xl font-black font-mono tracking-widest text-white">
+            LIVE_ALERTS
+          </div>
         </div>
 
-        {/* FEED LIST */}
-        <div className="flex-1 overflow-y-auto no-scrollbar">
-          {sources.map((feed, index) => {
-            const region = DRONE_REGION_MAP[feed.id] || (feed.label === 'UPLOADED' ? 'Local Video Feed' : 'Remote Stream');
-
-            // For modal compatibility
-            const feedWithRegion = { ...feed, region };
-
+        {/* ALERT LIST — OLD STYLE */}
+        <div className="flex-1 overflow-y-auto">
+          {alerts.map((alert) => {
+            const Icon = alert.icon;
             return (
-              <motion.div
-                key={feed.id}
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: index * 0.03 }}
-                onClick={() => setSelectedFeed(feedWithRegion)}
-                className="
-                  px-6 py-4
-                  border-b border-white/5
-                  cursor-pointer
-                  hover:bg-white/[0.03]
-                  transition-colors
-                "
+              <div
+                key={alert.id}
+                onClick={() => setSelectedAlert(alert)}
+                className="flex border-b border-white/5 hover:bg-white/[0.03] cursor-pointer"
               >
-                <div className="flex items-center justify-between gap-4">
-                  {/* REGION */}
-                  <div className="flex-1">
-                    <div className="text-base font-black text-white uppercase tracking-wide">
-                      {region}
-                    </div>
+                {/* side accent */}
+                <div className="w-1 bg-cyan-500/30" />
 
-                    {/* LIVE INDICATOR */}
-                    <div className="mt-2 flex items-center gap-2 text-[11px] text-emerald-400 uppercase tracking-widest font-bold">
-                      <span className="relative">
-                        <span className="absolute inset-0 rounded-full bg-emerald-400/30 animate-ping" />
-                        <span className="relative block w-2 h-2 rounded-full bg-emerald-400" />
-                      </span>
-                      LIVE FEED
+                <div className="p-3 flex gap-3 flex-1 font-mono">
+                  <div className="flex-1">
+                    <div className="text-[11px] font-black uppercase text-white">
+                      {alert.location}
+                    </div>
+                    <div className={clsx(
+                      'text-[9px] uppercase font-bold',
+                      severityColor(alert.severity)
+                    )}>
+                      {alert.severity}
+                    </div>
+                    <div className="text-[9px] text-white/40 mt-1">
+                      {alert.time}
                     </div>
                   </div>
 
-                  {/* PASSIVE CARET */}
-                  <span className="text-white/20 text-sm">›</span>
+                  <Icon className={clsx(
+                    'w-4 h-4 mt-1',
+                    severityColor(alert.severity)
+                  )} />
                 </div>
-              </motion.div>
+              </div>
             );
           })}
         </div>
-
-        {/* FOOTER */}
-        <div className="px-6 py-3 border-t border-emerald-500/15 bg-black/50">
-          <span className="text-[10px] text-white/40 tracking-widest">
-            SELECT FEED TO INSPECT
-          </span>
-        </div>
       </motion.div>
 
-      {/* CENTER MODAL */}
+      {/* ================= MODAL (FROM NEW) ================= */}
       <AnimatePresence>
-        {selectedFeed && (
+        {selectedAlert && (
           <motion.div
+            className="fixed inset-0 bg-black/90 z-[100] flex items-center justify-center"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            onClick={() => setSelectedFeed(null)}
-            className="
-              fixed inset-0 bg-black/95 backdrop-blur-md
-              z-[100] flex items-center justify-center p-8
-            "
+            onClick={() => setSelectedAlert(null)}
           >
             <motion.div
-              initial={{ scale: 0.97, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.97, opacity: 0 }}
               onClick={(e) => e.stopPropagation()}
-              className="
-                relative max-w-6xl w-full h-[72vh]
-                bg-[#0a1120] border border-emerald-500/15
-                flex overflow-hidden font-mono
-              "
+              className="bg-[#0a1120] w-[80vw] h-[70vh] border border-white/10 relative"
+              initial={{ scale: 0.96 }}
+              animate={{ scale: 1 }}
             >
-              {/* CLOSE */}
               <button
-                onClick={() => setSelectedFeed(null)}
-                className="
-                  absolute top-6 right-6 z-20
-                  bg-black/60 border border-white/10
-                  p-2 hover:border-emerald-500/50
-                "
+                onClick={() => setSelectedAlert(null)}
+                className="absolute top-4 right-4 border border-white/10 p-2"
               >
-                <X className="w-5 h-5 text-white/60 hover:text-emerald-400" />
+                <X className="w-4 h-4 text-white/70" />
               </button>
 
-              {/* VIDEO */}
-              <div className="flex-1 relative bg-black">
-                <WebRTCVideo
-                  src={`${WEBRTC_BASE_URL}/${selectedFeed.stream}/whep`}
-                  autoPlay
-                  muted
-                  playsInline
-                  className="w-full h-full object-cover"
-                />
-
-                {/* HUD */}
-                <div className="absolute top-6 left-6 space-y-3">
-                  <div className="px-4 py-1.5 bg-black/70 border-l-4 border-emerald-400 text-sm text-emerald-400 font-black tracking-widest">
-                    LIVE FEED
-                  </div>
-                  <div className="px-4 py-1.5 bg-black/60 border-l-2 border-white/20 text-xs text-white/70">
-                    {new Date().toISOString().replace('T', ' ').slice(0, 19)}
-                  </div>
-                </div>
-              </div>
-
-              {/* INFO PANEL */}
-              <div className="w-[420px] bg-[#070b14] border-l border-emerald-500/15 p-10">
-                <span className="text-xs text-emerald-400/60 uppercase tracking-[0.35em]">
-                  Active Feed
-                </span>
-
-                <h2 className="mt-2 text-4xl font-black text-white uppercase tracking-tight">
-                  {selectedFeed.region}
-                </h2>
-
-                {/* DRONE LABEL — ONLY HERE */}
-                <div className="mt-2 text-sm text-white/50 uppercase tracking-widest">
-                  {selectedFeed.label}
-                </div>
-
-                <p className="mt-6 text-base text-white/70 leading-relaxed">
-                  Real-time aerial surveillance feed from <strong>{selectedFeed.label}</strong>.
-                  Edge analytics and tracking overlays are currently active.
-                </p>
-
-                <button
-                  onClick={() => setSelectedFeed(null)}
-                  className="
-                    mt-10 w-full py-5
-                    bg-white/5 hover:bg-white/10
-                    border border-white/10 hover:border-emerald-500/50
-                    text-white font-black uppercase tracking-[0.35em] text-sm
-                  "
-                >
-                  CLOSE VIEW
-                </button>
-              </div>
+              <WebRTCVideo
+                src={`${WEBRTC_BASE_URL}/${selectedAlert.stream}/whep`}
+                autoPlay
+                muted
+                playsInline
+                className="w-full h-full object-cover"
+              />
             </motion.div>
           </motion.div>
         )}

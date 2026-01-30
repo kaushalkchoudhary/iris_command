@@ -4,22 +4,54 @@ import time
 import threading
 import subprocess
 import numpy as np
+import gc
+import multiprocessing as mp
+import signal
 
 from ultralytics import YOLO
 import supervision as sv
+import torch
 
 from control_server import (
     run_control_server,
     update_metrics,
+    update_frame,
     get_overlay_state,
+    ensure_overlay,
 )
 
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+# Shared communication objects
+frame_queue = None
+metrics_queue = None
+overlay_shared_dict = None
 
-ENGINE_PATH_VEHICLE = "data/yolov11n-visdrone.engine"
-ENGINE_PATH_CROWD = "data/best_head.onnx"
+def relay_worker(stop_event, f_q, m_q):
+    """Relay metrics and frames from multiprocess queues to control server."""
+    while not stop_event.is_set():
+        # Batch process frames to reduce lock contention
+        try:
+            for _ in range(20): # Process up to 20 frames per cycle
+                if f_q.empty(): break
+                name, data = f_q.get_nowait()
+                update_frame(name, data)
+        except: pass
+        
+        # Batch process metrics
+        try:
+            for _ in range(10):
+                if m_q.empty(): break
+                name, data = m_q.get_nowait()
+                update_metrics(name, data)
+        except: pass
+        
+        time.sleep(0.005) # Extreme low latency relay
+
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|buffer_size;1024000|analyzeduration;100000|probesize;100000"
+
+MODEL_PATH_VEHICLE = "data/yolov11n-visdrone.pt"
+MODEL_PATH_CROWD = "data/best_head.pt"
 RTSP_OUT_BASE = "rtsp://127.0.0.1:8554/processed_"
-TARGET_FPS = 10
+TARGET_FPS = 25
 
 # Drones that use crowd counting model
 CROWD_DRONES = {"bcpdrone10", "bcpdrone12"}
@@ -67,11 +99,7 @@ class AnalyticsState:
         self.fps_value = 0.0
 
     def update(self, tracked_detections) -> dict:
-        """
-        Update analytics with new detections and return metrics dict.
-        tracked_detections: supervision Detections with tracker_id set.
-        """
-        # Update FPS
+        """Update analytics with new detections."""
         self.fps_frame_count += 1
         elapsed = time.time() - self.fps_last_time
         if elapsed >= 1.0:
@@ -82,422 +110,238 @@ class AnalyticsState:
         if tracked_detections is None or tracked_detections.tracker_id is None:
             return self._build_metrics(0, [0, 0, 0, 0], 0.0)
 
-        # Calculate speeds and classify
-        speed_counts = [0, 0, 0, 0]  # stalled, slow, medium, fast
+        speed_counts = [0, 0, 0, 0]
         total_area = 0.0
         new_positions = {}
 
         for i, (xyxy, tid) in enumerate(zip(tracked_detections.xyxy, tracked_detections.tracker_id)):
             x1, y1, x2, y2 = xyxy
-            cx = (x1 + x2) / 2
-            cy = (y1 + y2) / 2
-            w = max(0, x2 - x1)
-            h = max(0, y2 - y1)
-            total_area += w * h
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            total_area += (x2 - x1) * (y2 - y1)
 
-            # Calculate speed
             speed_px_s = 0.0
             if tid in self.track_positions:
                 old_cx, old_cy, old_speed = self.track_positions[tid]
-                dx = cx - old_cx
-                dy = cy - old_cy
-                raw_speed = np.sqrt(dx * dx + dy * dy) * self.fps
-                # Smooth speed
+                raw_speed = np.sqrt((cx - old_cx)**2 + (cy - old_cy)**2) * self.fps
                 speed_px_s = old_speed * 0.4 + raw_speed * 0.6 if old_speed > 0 else raw_speed
 
             new_positions[tid] = (cx, cy, speed_px_s)
-
-            # Classify and count
-            bucket = classify_speed(speed_px_s)
-            speed_counts[bucket] += 1
+            speed_counts[classify_speed(speed_px_s)] += 1
 
         self.track_positions = new_positions
-
         return self._build_metrics(len(tracked_detections), speed_counts, total_area)
 
     def _build_metrics(self, detection_count: int, speed_counts: list, total_area: float) -> dict:
-        """Build metrics dictionary from raw values."""
         total = max(1, sum(speed_counts))
-
-        # Speed percentages
         stalled_pct = round(speed_counts[0] / total * 100)
         slow_pct = round(speed_counts[1] / total * 100)
         medium_pct = round(speed_counts[2] / total * 100)
         fast_pct = round(speed_counts[3] / total * 100)
 
-        # Traffic density: bbox area relative to frame area
-        density = min(100.0, (total_area / self.frame_area) * 100.0)
-        if self.traffic_density_ema <= 0:
-            self.traffic_density_ema = density
-        else:
-            self.traffic_density_ema = self.traffic_density_ema * (1 - EMA_ALPHA) + density * EMA_ALPHA
-        traffic_density_pct = int(round(min(100, max(0, self.traffic_density_ema))))
-
-        # Mobility index: weighted average of speed buckets
+        density = min(100.0, (total_area / self.frame_area) * 100.0 * 6.5)
+        self.traffic_density_ema = self.traffic_density_ema * (1-EMA_ALPHA) + density * EMA_ALPHA if self.traffic_density_ema > 0 else density
+        
+        mobility = 0.0
         if total > 0:
-            w_stalled, w_slow, w_medium, w_fast = 10.0, 40.0, 70.0, 95.0
-            mobility = (
-                speed_counts[0] * w_stalled +
-                speed_counts[1] * w_slow +
-                speed_counts[2] * w_medium +
-                speed_counts[3] * w_fast
-            ) / total
-        else:
-            mobility = 0.0
+            weights = [10.0, 40.0, 70.0, 95.0]
+            mobility = sum(c * w for c, w in zip(speed_counts, weights)) / total
+        self.mobility_index_ema = self.mobility_index_ema * (1-EMA_ALPHA) + mobility * EMA_ALPHA if self.mobility_index_ema > 0 else mobility
 
-        if self.mobility_index_ema <= 0:
-            self.mobility_index_ema = mobility
-        else:
-            self.mobility_index_ema = self.mobility_index_ema * (1 - EMA_ALPHA) + mobility * EMA_ALPHA
-        mobility_index_pct = int(round(min(100, max(0, self.mobility_index_ema))))
-
-        # Congestion index: combination of density and inverted mobility
-        congestion = int(round(
-            traffic_density_pct * 0.6 + (100 - mobility_index_pct) * 0.4
-        ))
-        congestion = min(100, max(0, congestion))
+        t_density = int(round(self.traffic_density_ema))
+        m_index = int(round(self.mobility_index_ema))
+        congestion = min(100, max(0, int(round(t_density * 0.6 + (100 - m_index) * 0.4))))
 
         return {
             "fps": round(self.fps_value, 1),
             "congestion_index": congestion,
-            "traffic_density": traffic_density_pct,
-            "mobility_index": mobility_index_pct,
-            "stalled_pct": stalled_pct,
-            "slow_pct": slow_pct,
-            "medium_pct": medium_pct,
-            "fast_pct": fast_pct,
+            "traffic_density": t_density,
+            "mobility_index": m_index,
+            "stalled_pct": stalled_pct, "slow_pct": slow_pct, "medium_pct": medium_pct, "fast_pct": fast_pct,
             "detection_count": detection_count,
         }
 
 
-def start_rtsp_publisher(w, h, fps, name):
-    rtsp_url = RTSP_OUT_BASE + name
-    print(f"[→] Publishing to {rtsp_url}")
+class FrameCapture:
+    def __init__(self, url):
+        self.cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        self.frame, self.ret, self.running = None, False, True
+        self.lock = threading.Lock()
+        if self.cap.isOpened():
+            self.thread = threading.Thread(target=self._update, daemon=True)
+            self.thread.start()
 
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-loglevel", "warning",
-        # Input options
-        "-f", "rawvideo",
-        "-pix_fmt", "bgr24",
-        "-s", f"{w}x{h}",
-        "-r", str(int(fps)),
-        "-i", "pipe:0",
-        # Output options
-        "-an",
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-tune", "zerolatency",
-        "-g", str(int(fps * 2)),  # keyframe interval
-        "-pix_fmt", "yuv420p",
-        "-f", "rtsp",
-        "-rtsp_transport", "tcp",
-        rtsp_url,
-    ]
+    def _update(self):
+        while self.running:
+            ret, frame = self.cap.read()
+            with self.lock:
+                self.ret, self.frame = ret, frame
+            if not ret: time.sleep(1.0)
+            else: time.sleep(0.005)
 
-    try:
-        p = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=10**6,
-        )
-    except Exception as e:
-        print(f"[!] Failed to start ffmpeg for {name}: {e}")
-        return None
+    def read(self):
+        with self.lock: return self.ret, self.frame
 
-    # Give ffmpeg a moment to start
-    time.sleep(0.1)
+    def release(self):
+        self.running = False
+        if hasattr(self, 'thread'): self.thread.join(timeout=1.0)
+        self.cap.release()
 
-    # Check if process is still running
-    if p.poll() is not None:
-        _, stderr = p.communicate()
-        print(f"[!] ffmpeg exited immediately for {name}: {stderr.decode()}")
-        return None
-
-    # Send a few blank frames to initialize the stream
-    blank = np.zeros((h, w, 3), dtype=np.uint8)
-    for _ in range(5):
-        try:
-            p.stdin.write(blank.tobytes())
-            p.stdin.flush()
-        except BrokenPipeError:
-            _, stderr = p.communicate()
-            print(f"[!] Failed to initialize RTSP publisher for {name}: {stderr.decode()}")
-            return None
-        time.sleep(0.05)
-
-    print(f"[✓] RTSP publisher started for {name}")
-    return p
+    def get(self, prop): return self.cap.get(prop)
+    def isOpened(self): return self.cap.isOpened()
 
 
-def process_stream(index, name, url, stop_event):
+def process_stream(index, name, url, stop_event, f_q, m_q, overlay_dict):
     print(f"[+] Starting inference: {name}")
-
-    if url.startswith("rtsp"):
-        cap = cv2.VideoCapture(f"{url}?rtsp_transport=tcp", cv2.CAP_FFMPEG)
-    else:
-        cap = cv2.VideoCapture(url)
-
+    # Fix for CUDA initialization in new process
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    cap = FrameCapture(url)
     if not cap.isOpened():
         print(f"[!] Failed to open source: {name}")
         return
 
-    src_fps = cap.get(cv2.CAP_PROP_FPS) or 25
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    w, h, src_fps = int(cap.get(3)), int(cap.get(4)), cap.get(5) or 25
+    
+    is_crowd = name in CROWD_DRONES
+    model = YOLO(MODEL_PATH_CROWD if is_crowd else MODEL_PATH_VEHICLE, task="detect")
+    if torch.cuda.is_available(): model.to("cuda")
 
-    # Frame skipping: crowd model needs more skip due to ONNX being slower
-    is_crowd_stream = name in CROWD_DRONES
-    if is_crowd_stream:
-        stride = 5  # Process every 5th frame for crowd model
-    else:
-        stride = 2  # Process every 2nd frame for vehicle model
-    proc_fps = src_fps / stride
+    target_classes = None if is_crowd else [3, 4, 5, 7, 8, 9]
+    CLASS_NAMES = {0: "head"} if is_crowd else {3: "car", 4: "van", 5: "truck", 7: "bus", 8: "motor", 9: "bicycle"}
 
-    publisher = start_rtsp_publisher(w, h, proc_fps, name)
-    if publisher is None:
-        print(f"[!] Failed to start RTSP publisher for {name}, aborting")
-        cap.release()
-        return
-
-    # Select model based on drone type
-    is_crowd_model = name in CROWD_DRONES
-    if is_crowd_model:
-        model_path = ENGINE_PATH_CROWD
-        target_classes = None  # Crowd model - detect all classes (heads)
-        CLASS_NAMES = {0: "head"}
-        print(f"[*] Using CROWD model for {name}")
-    else:
-        model_path = ENGINE_PATH_VEHICLE
-        target_classes = [3, 4, 5, 7, 8, 9]  # VisDrone vehicle classes
-        CLASS_NAMES = {
-            3: "car",
-            4: "van",
-            5: "truck",
-            7: "bus",
-            8: "motor",
-            9: "bicycle"
-        }
-        print(f"[*] Using VEHICLE model for {name}")
-
-    model = YOLO(model_path, task="detect")
-
-    tracker = sv.ByteTrack(frame_rate=proc_fps)
-
-    # Heatmap for activity visualization
-    heatmap = np.zeros((h, w), dtype=np.float32)
-
-    # Trail history: track_id -> list of (x, y) points
-    trail_history = {}
-    MAX_TRAIL_LEN = 50  # Longer trails for better visualization
-
-    # Speed colors for indicator dots (stalled=red, slow=orange, medium=yellow, fast=green)
-    SPEED_COLORS = [
-        (0, 0, 255),    # Red - stalled
-        (0, 165, 255),  # Orange - slow
-        (0, 255, 255),  # Yellow - medium
-        (0, 255, 0),    # Green - fast
-    ]
-
-    # Initialize analytics state for this stream
-    analytics = AnalyticsState(w, h, proc_fps)
+    tracker = sv.ByteTrack(frame_rate=src_fps)
+    trail_history = {} # tid -> list of (cx, cy, r)
+    MAX_TRAIL_LEN = 30
+    
+    analytics = AnalyticsState(w, h, src_fps)
     last_metrics_update = time.time()
-    METRICS_UPDATE_INTERVAL = 0.5  # Update metrics every 500ms
-
-    frame_idx = 0
 
     while cap.isOpened() and not stop_event.is_set():
         ret, frame = cap.read()
-        if not ret:
-            break
-
-        if frame_idx % stride != 0:
-            frame_idx += 1
+        if not ret or frame is None:
+            time.sleep(0.01)
             continue
 
-        overlay = get_overlay_state(name)
-        show_heatmap = overlay["heatmap"]
-        show_trails = overlay["trails"]
-        show_bboxes = overlay["bboxes"]
-
-        # Decay heatmap
-        heatmap *= 0.97
-
-        # Run inference with appropriate class filter
-        predict_args = {
-            "conf": 0.25 if is_crowd_model else 0.10,
-            "max_det": 500,
-            "verbose": False,
-        }
-        if target_classes is not None:
-            predict_args["classes"] = target_classes
-
-        results = model.predict(frame, **predict_args)[0]
-
-        detections = sv.Detections.from_ultralytics(results)
-        tracked = tracker.update_with_detections(detections)
-
-        # Track current frame's track IDs for cleanup
+        # Get overlay state from shared dict
+        overlay = overlay_dict.get(name, {"heatmap": True, "trails": True, "bboxes": True})
+        
+        results = model.predict(frame, conf=0.25 if is_crowd else 0.1, max_det=500, verbose=False, classes=target_classes)[0]
+        tracked = tracker.update_with_detections(sv.Detections.from_ultralytics(results))
+        
         current_track_ids = set()
-
         if tracked is not None and tracked.tracker_id is not None:
             for i, (xyxy, tid) in enumerate(zip(tracked.xyxy, tracked.tracker_id)):
                 x1, y1, x2, y2 = xyxy
-                cx = int((x1 + x2) / 2)
-                cy = int(y2)  # Bottom center for ground contact point
-
+                cx, cy = int((x1+x2)/2), int((y1+y2)/2)
+                r = int(min(x2-x1, y2-y1) * 0.4)
                 current_track_ids.add(tid)
+                if tid not in trail_history: trail_history[tid] = []
+                trail_history[tid].append((cx, cy, r))
+                if len(trail_history[tid]) > MAX_TRAIL_LEN: trail_history[tid].pop(0)
 
-                # Update trail history
-                if tid not in trail_history:
-                    trail_history[tid] = []
-                trail_history[tid].append((cx, cy))
-                if len(trail_history[tid]) > MAX_TRAIL_LEN:
-                    trail_history[tid].pop(0)
+        # Cleanup stale tracks
+        for tid in [t for t in trail_history if t not in current_track_ids]:
+            if trail_history[tid]: trail_history[tid].pop(0)
+            else: del trail_history[tid]
 
-                # Add to heatmap (smaller, more localized circles)
-                cv2.circle(heatmap, (cx, cy), 8, 1.5, -1)
-
-        # Cleanup old tracks from trail history
-        stale_ids = [tid for tid in trail_history if tid not in current_track_ids]
-        for tid in stale_ids:
-            # Keep trails for a bit after track disappears, then remove
-            if len(trail_history[tid]) > 0:
-                trail_history[tid] = trail_history[tid][1:]  # Fade out
-            if len(trail_history[tid]) == 0:
-                del trail_history[tid]
-
-        # Clamp heatmap to prevent oversaturation
-        np.clip(heatmap, 0, 50, out=heatmap)
-
-        # Update analytics and send metrics to frontend
-        metrics = analytics.update(tracked)
-        now = time.time()
-        if now - last_metrics_update >= METRICS_UPDATE_INTERVAL:
-            update_metrics(name, metrics)
-            last_metrics_update = now
+        if time.time() - last_metrics_update >= 0.5:
+            m_q.put((name, analytics.update(tracked)))
+            last_metrics_update = time.time()
 
         out = frame.copy()
 
-        # Draw heatmap overlay (subtle, localized)
-        if show_heatmap:
-            sm = cv2.GaussianBlur(heatmap, (31, 31), 0)
-            mv = sm.max()
-            if mv > 1.0:
-                norm = np.clip(sm / mv * 255, 0, 255).astype(np.uint8)
-                # Use a warmer colormap for better visibility
-                colored = cv2.applyColorMap(norm, cv2.COLORMAP_HOT)
-                # Only show where there's significant heat
-                mask = norm > 25
-                if np.any(mask):
-                    out[mask] = cv2.addWeighted(out[mask], 0.7, colored[mask], 0.3, 0)
+        # Heatmap Rendering (Optimized with scaling)
+        if overlay["heatmap"]:
+            scale = 0.5
+            sh, sw = int(h * scale), int(w * scale)
+            tail_mask = np.zeros((sh, sw), dtype=np.uint8)
+            for tid, pts in trail_history.items():
+                if tid not in current_track_ids: continue
+                sub_pts = pts[-15:]
+                for i in range(len(sub_pts)):
+                    tx, ty, tr = int(sub_pts[i][0] * scale), int(sub_pts[i][1] * scale), int(sub_pts[i][2] * scale)
+                    phase = (i + 1) / len(sub_pts)
+                    intensity = int(35 + 220 * phase)
+                    curr_r = int(tr * (0.7 + 0.3 * phase))
+                    cv2.circle(tail_mask, (tx, ty), curr_r, intensity, -1)
+                    if i > 0:
+                        px, py = int(sub_pts[i-1][0] * scale), int(sub_pts[i-1][1] * scale)
+                        pr = int(sub_pts[i-1][2] * scale)
+                        prev_phase = i / len(sub_pts)
+                        prev_intensity = int(35 + 220 * prev_phase)
+                        line_intensity = (intensity + prev_intensity) // 2
+                        line_thick = (curr_r + int(pr * (0.7 + 0.3 * prev_phase))) // 2
+                        cv2.line(tail_mask, (px, py), (tx, ty), line_intensity, max(1, line_thick))
+            
+            if np.any(tail_mask > 0):
+                blur = cv2.GaussianBlur(tail_mask, (11, 11), 0)
+                colored = cv2.applyColorMap(blur, cv2.COLORMAP_JET)
+                colored_full = cv2.resize(colored, (w, h), interpolation=cv2.INTER_LINEAR)
+                blur_full = cv2.resize(blur, (w, h), interpolation=cv2.INTER_LINEAR)
+                m = blur_full > 5
+                out[m] = cv2.addWeighted(out[m], 0.45, colored_full[m], 0.55, 0)
 
-        # Draw trails as fading polylines (blue gradient like reference)
-        if show_trails:
-            for tid, points in trail_history.items():
-                if len(points) < 2:
-                    continue
-                # Draw trail with fading effect (older = dimmer, blue gradient)
-                for j in range(1, len(points)):
-                    alpha = j / len(points)  # 0 to 1, newer = brighter
-                    # Blue-cyan gradient trail (BGR format)
-                    color = (
-                        int(255 * alpha),      # B - bright blue
-                        int(200 * alpha),      # G - some green for cyan tint
-                        int(50 * alpha)        # R - minimal red
-                    )
-                    thickness = max(2, int(2 + alpha * 3))
-                    pt1 = points[j - 1]
-                    pt2 = points[j]
-                    cv2.line(out, pt1, pt2, color, thickness, cv2.LINE_AA)
+        # Trails Rendering (1px Blue)
+        if overlay["trails"]:
+            for tid, pts in trail_history.items():
+                if len(pts) < 2: continue
+                for i in range(1, len(pts)):
+                    fade = (i + 1) / len(pts)
+                    color = (int(180 * fade), int(220 * fade), int(255 * fade))
+                    cv2.line(out, pts[i-1][:2], pts[i][:2], color, 1, cv2.LINE_AA)
 
-        # Draw bounding boxes and small labels
-        if show_bboxes and tracked is not None and tracked.tracker_id is not None:
-            # Get class IDs if available
-            class_ids = tracked.class_id if hasattr(tracked, 'class_id') and tracked.class_id is not None else [None] * len(tracked.xyxy)
-
+        # Bounding Boxes Rendering (1px Orange)
+        if overlay["bboxes"] and tracked is not None and tracked.tracker_id is not None:
             for i, (xyxy, tid) in enumerate(zip(tracked.xyxy, tracked.tracker_id)):
                 x1, y1, x2, y2 = map(int, xyxy)
+                cv2.rectangle(out, (x1, y1), (x2, y2), (0, 180, 255), 1, cv2.LINE_4)
+                label = f"#{tid}"
+                if not is_crowd:
+                    _, _, speed = analytics.track_positions.get(tid, (0,0,0))
+                    label += f" {CLASS_NAMES.get(int(tracked.class_id[i]), '')}"
+                cv2.putText(out, label, (x1, x1 if y1 < 10 else y1-2), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255,255,255), 1, cv2.LINE_AA)
 
-                # Get speed bucket for this track
-                speed_bucket = 0
-                if tid in analytics.track_positions:
-                    _, _, speed = analytics.track_positions[tid]
-                    speed_bucket = classify_speed(speed)
-
-                # Draw bbox with orange/yellow color (thin line)
-                bbox_color = (0, 180, 255)  # Orange in BGR
-                cv2.rectangle(out, (x1, y1), (x2, y2), bbox_color, 1, cv2.LINE_AA)
-
-                # Get class name
-                cls_id = class_ids[i] if i < len(class_ids) else None
-                cls_name = CLASS_NAMES.get(int(cls_id), "") if cls_id is not None else ""
-
-                # Build compact label (just ID if no class, or "ID cls" if class known)
-                label = f"#{tid}" if not cls_name else f"#{tid} {cls_name}"
-                font = cv2.FONT_HERSHEY_SIMPLEX
-                font_scale = 0.28  # Smaller font
-                thickness = 1
-                (tw, th), baseline = cv2.getTextSize(label, font, font_scale, thickness)
-
-                # Label position (above bbox)
-                lx = x1
-                ly = max(y1 - 2, th + 4)
-
-                # Small orange label background
-                padding = 2
-                cv2.rectangle(out, (lx, ly - th - padding),
-                             (lx + tw + padding * 2 + 6, ly + padding), (0, 100, 200), -1)
-
-                # White text
-                cv2.putText(out, label, (lx + padding, ly - 1), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
-
-                # Tiny speed indicator dot
-                dot_x = lx + tw + padding * 2 + 1
-                dot_y = ly - th // 2
-                dot_color = SPEED_COLORS[speed_bucket]
-                cv2.circle(out, (dot_x + 2, dot_y), 3, dot_color, -1)
-
-        # Write frame to RTSP publisher
-        if publisher is not None:
+        # Output MJPEG via queue
+        ret_enc, buffer = cv2.imencode('.jpg', out, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if ret_enc: 
             try:
-                publisher.stdin.write(out.tobytes())
-                publisher.stdin.flush()
-            except (BrokenPipeError, OSError):
-                print(f"[!] RTSP publisher pipe broken for {name}")
-                break
+                if f_q.full(): f_q.get_nowait()
+                f_q.put_nowait((name, buffer.tobytes()))
+            except: pass
 
-        frame_idx += 1
-
-    # Cleanup
     cap.release()
-    if publisher is not None:
-        try:
-            publisher.stdin.close()
-        except:
-            pass
-        publisher.wait(timeout=2)
-    print(f"[-] Stopped inference: {name}")
+    gc.collect()
 
-
-def start_source_backend(index, url, stop_event, name):
-    t = threading.Thread(target=process_stream, args=(index, name, url, stop_event), daemon=True)
-    t.start()
-    return t
-
-
-def start_upload_backend(file_path, stop_event, name):
-    t = threading.Thread(target=process_stream, args=(0, name, file_path, stop_event), daemon=True)
-    t.start()
-    return t
-
+def start_backend(idx, url, stop, name):
+    # Overlay is ensured in control_server, we sync it to our shared dict
+    overlay_shared_dict[name] = get_overlay_state(name)
+    
+    # Use multiprocessing Process instead of Thread
+    p = mp.Process(target=process_stream, args=(idx, name, url, stop, frame_queue, metrics_queue, overlay_shared_dict), daemon=True)
+    p.start()
+    return p
 
 def main():
-    run_control_server(start_source_backend, start_upload_backend, {})
+    global overlay_shared_dict, frame_queue, metrics_queue
+    ctx = mp.get_context('spawn')
+    
+    # Initialize shared memory
+    manager = ctx.Manager()
+    overlay_shared_dict = manager.dict()
+    frame_queue = ctx.Queue(maxsize=10)
+    metrics_queue = ctx.Queue(maxsize=10)
+    
+    # Start the relay thread to sync data across processes
+    stop_relay = threading.Event()
+    relay_t = threading.Thread(target=relay_worker, args=(stop_relay, frame_queue, metrics_queue), daemon=True)
+    relay_t.start()
+    
+    try:
+        # Start control server (FastAPI) which will spawn worker processes
+        run_control_server(start_backend, start_backend, overlay_shared_dict)
+    finally:
+        stop_relay.set()
+        relay_t.join(timeout=1.0)
 
-
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()

@@ -1,11 +1,10 @@
 active_sources:
-- 8
-- 10
+- 9
 overlays:
   bcpdrone1:
-    bboxes: true
+    bboxes: false
     heatmap: true
-    trails: true
+    trails: false
   bcpdrone10:
     bboxes: true
     heatmap: true
@@ -45,11 +44,11 @@ overlays:
   bcpdrone8:
     bboxes: true
     heatmap: true
-    trails: true
+    trails: false
   bcpdrone9:
     bboxes: true
     heatmap: true
-    trails: true
+    trails: false
 rtsp_links:
 - rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone1
 - rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone2

@@ -10,12 +10,10 @@ import IRISLoader from './components/Dashboard/IRISLoader';
 import WelcomeScreen from './components/Dashboard/WelcomeScreen';
 import HLSVideo from './components/UI/HLSVideo';
 import WebRTCVideo from './components/UI/WebRTCVideo';
-import Login from './components/Login';
+import Login from './Login';
 import LeftPanel from './components/Dashboard/LeftPanel';
 
 // MediaMTX stream configuration
-// In development, Vite proxies /hls/* to MediaMTX :8888
-// In production, configure nginx/reverse proxy accordingly
 const HLS_BASE_URL = import.meta.env.DEV ? '/hls' : `http://${window.location.hostname}:8888`;
 const WEBRTC_BASE_URL = import.meta.env.DEV ? '/webrtc' : `http://${window.location.hostname}:8889`;
 const API_BASE_URL = import.meta.env.DEV ? '/api' : `http://${window.location.hostname}:9010`;
@@ -33,24 +31,10 @@ const startDroneProcessing = async (droneIndex) => {
   }
 };
 
-// Stop processing a drone on the backend
-const stopDroneProcessing = async (droneIndex) => {
-  try {
-    await fetch(`${API_BASE_URL}/sources/stop`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ index: droneIndex }),
-    });
-  } catch (e) {
-    console.error('Failed to stop drone processing:', e);
-  }
-};
-
 const CameraAnalytics = ({ scale = 1, camIndex = 0, useCase, videoId }) => {
   const [metrics, setMetrics] = useState(null);
   const [hasReceivedData, setHasReceivedData] = useState(false);
 
-  // Use videoId directly as the source name (e.g., 'bcpdrone1', 'bcpdrone3')
   const sourceName = videoId;
 
   useEffect(() => {
@@ -61,7 +45,6 @@ const CameraAnalytics = ({ scale = 1, camIndex = 0, useCase, videoId }) => {
         const response = await fetch(`${API_BASE_URL}/metrics`);
         if (response.ok) {
           const data = await response.json();
-          // Check if metrics exist for this source
           if (data[sourceName]) {
             setMetrics(data[sourceName]);
             setHasReceivedData(true);
@@ -77,536 +60,286 @@ const CameraAnalytics = ({ scale = 1, camIndex = 0, useCase, videoId }) => {
     return () => clearInterval(interval);
   }, [sourceName]);
 
-  // Reset when videoId changes
   useEffect(() => {
     setHasReceivedData(false);
     setMetrics(null);
   }, [videoId]);
 
   const congestion = metrics?.congestion_index || 0;
-  const density = metrics?.traffic_density || 0;
   const speed = Math.round(metrics?.mobility_index || 0);
-  // const fps = metrics?.fps || 0;
+  const density = metrics?.traffic_density || 0;
   const detections = metrics?.detection_count || 0;
+  const stalled = metrics?.stalled_pct || 0;
+  const slow = metrics?.slow_pct || 0;
+  const medium = metrics?.medium_pct || 0;
+  const fast = metrics?.fast_pct || 0;
+  const fps = metrics?.fps || 0;
 
-  // Color based on congestion (higher = worse = red)
-  const getCongestionColor = (val) => {
-    if (val > 75) return '#ef4444'; // red
-    if (val > 50) return '#eab308'; // yellow
-    if (val > 25) return '#34d399'; // emerald-400
-    return '#10b981'; // emerald-500
-  };
-
-  // Color based on mobility (higher = better = green)
-  const getMobilityColor = (val) => {
-    if (val > 75) return '#10b981'; // emerald-500
-    if (val > 50) return '#34d399'; // emerald-400
-    if (val > 25) return '#eab308'; // yellow
-    return '#ef4444'; // red
-  };
-
-  // Color based on density (higher = worse = red)
-  const getDensityColor = (val) => {
-    if (val > 75) return '#ef4444'; // red
-    if (val > 50) return '#eab308'; // yellow
-    if (val > 25) return '#34d399'; // emerald-400
-    return '#10b981'; // emerald-500
-  };
-
-  // Status based on real congestion index
   let status = 'SMOOTH';
-  let color = 'text-emerald-500';
-  let borderColor = 'border-emerald-500/50';
+  let color = 'text-cyan-400';
+  let borderColor = 'border-cyan-400/50';
   if (congestion > 75) { status = 'HEAVY'; color = 'text-red-500'; borderColor = 'border-red-500/50'; }
   else if (congestion > 50) { status = 'SLOW'; color = 'text-yellow-500'; borderColor = 'border-yellow-500/50'; }
-  else if (congestion > 25) { status = 'MODERATE'; color = 'text-emerald-400'; borderColor = 'border-emerald-400/50'; }
+  else if (congestion > 25) { status = 'MODERATE'; color = 'text-cyan-400'; borderColor = 'border-cyan-400/50'; }
 
-  // Labels based on Use Case
+  const nodeNames = ['IRIS-ZONE-NORTH', 'IRIS-ZONE-SOUTH', 'IRIS-ZONE-EAST', 'IRIS-ZONE-WEST'];
+  const nodeName = nodeNames[camIndex % nodeNames.length] || 'IRIS-ZONE-01';
+  const lat = (12.9716 + (Math.random() * 0.01 - 0.005)).toFixed(4);
+  const lng = (77.5946 + (Math.random() * 0.01 - 0.005)).toFixed(4);
+
   const configs = {
-    traffic: { primary: 'MOBILITY', secondary: 'CONGESTION', statusLabel: 'Traffic' },
-    crowd: { primary: 'DENSITY', secondary: 'FLOW RATE', statusLabel: 'Crowd' },
-    safety: { primary: 'RISK LVL', secondary: 'ALERT CONF', statusLabel: 'Safety' },
-    perimeter: { primary: 'PROXIMITY', secondary: 'SIGNAL', statusLabel: 'Perimeter' }
+    traffic: { primary: 'MOBILITY', secondary: 'CONGESTION', unit: '%', statusLabel: 'Traffic' },
+    crowd: { primary: 'DENSITY', secondary: 'FLOW RATE', unit: 'PPL/M²', statusLabel: 'Crowd' },
+    safety: { primary: 'RISK LVL', secondary: 'ALERT CONF', unit: '%', statusLabel: 'Safety' },
+    perimeter: { primary: 'PROXIMITY', secondary: 'SIGNAL', unit: 'M', statusLabel: 'Perimeter' }
   };
 
   const config = configs[useCase] || configs.traffic;
 
-  // Only show overlay when receiving processed frames (metrics data exists for this source)
-  if (!hasReceivedData) {
-    return null;
-  }
+  if (!hasReceivedData && !metrics) return null;
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0.5 }}
-      className="absolute inset-0 pointer-events-none"
-    >
-      {/* Left-side Analytics */}
+    <>
       <div
-        className="absolute left-8 top-1/2 -translate-y-1/2 flex flex-col gap-5 pointer-events-none origin-left"
+        className="absolute left-4 top-1/2 -translate-y-1/2 flex flex-col gap-4 pointer-events-none origin-left"
         style={{ transform: `scale(${scale})` }}
       >
-        {/* Mobility Index */}
-        <div className="bg-black/70 backdrop-blur-md rounded-lg p-5 border border-emerald-500/30">
-          <div className="text-sm text-emerald-400 font-mono font-bold tracking-wider mb-2">{config.primary}</div>
-          <div
-            className="text-7xl font-black font-mono drop-shadow-[0_0_20px_currentColor]"
-            style={{ color: getMobilityColor(speed) }}
-          >
-            <CountUp
-              end={speed}
-              duration={0.5}
-              preserveValue={true}
-            />
-          </div>
-        </div>
+        <div className="flex items-center gap-4">
+          <div className="relative h-64 w-20 overflow-hidden border-l-2 border-white/10 bg-black/20 backdrop-blur-sm">
+            <div className="absolute top-1/2 left-0 w-full h-10 -translate-y-1/2 bg-white border-l-4 border-cyan-500 z-20 flex items-center pl-2 shadow-[0_0_20px_rgba(255,255,255,0.2)]">
+              <span className="text-2xl font-black text-black font-mono leading-none tracking-tighter">
+                <CountUp end={speed} duration={0.4} preserveValue={true} />
+              </span>
+              <div className="absolute right-[-4px] w-0 h-0 border-t-[5px] border-t-transparent border-b-[5px] border-b-transparent border-l-[8px] border-l-white"></div>
+            </div>
 
-        {/* Real-time Stats */}
-        <div className="font-mono flex flex-col gap-4 bg-black/70 backdrop-blur-md rounded-lg p-4 border border-white/10">
-          <div className="flex items-center justify-between gap-6">
-            <span className="text-emerald-400 font-black text-sm tracking-wider">DENSITY</span>
-            <span
-              className="font-black text-2xl drop-shadow-[0_0_10px_currentColor]"
-              style={{ color: getDensityColor(density) }}
+            <motion.div
+              animate={{ y: speed * 4 }}
+              transition={{ type: "spring", stiffness: 100, damping: 20 }}
+              className="absolute bottom-1/2 left-0 w-full flex flex-col-reverse items-end pr-3"
             >
-              <CountUp
-                end={density}
-                duration={0.5}
-                preserveValue={true}
-              />
-            </span>
+              {[...Array(25)].map((_, i) => {
+                const val = i * 5;
+                const isMajor = val % 10 === 0;
+                return (
+                  <div key={val} className="h-[20px] flex items-center justify-end gap-2 shrink-0">
+                    {isMajor && (
+                      <span className="text-[10px] font-mono font-bold text-white/40">
+                        {val.toString().padStart(3, '0')}
+                      </span>
+                    )}
+                    <div className={`${isMajor ? 'w-4 h-[2px] bg-white/40' : 'w-2 h-[1px] bg-white/20'}`} />
+                  </div>
+                );
+              })}
+            </motion.div>
+
+            <div className="absolute top-0 left-0 w-full h-12 bg-gradient-to-b from-[#050a14] to-transparent z-10 opacity-80"></div>
+            <div className="absolute bottom-0 left-0 w-full h-12 bg-gradient-to-t from-[#050a14] to-transparent z-10 opacity-80"></div>
           </div>
-          {/* <div className="flex items-center justify-between gap-6">
-            <span className="text-emerald-400 font-black text-sm tracking-wider">FPS</span>
-            <span className="text-emerald-300 font-black text-2xl">{fps.toFixed(1)}</span>
-          </div> */}
-          <div className="flex items-center justify-between gap-6">
-            <span className="text-purple-400 font-black text-sm tracking-wider">OBJECTS</span>
-            <span className="text-purple-300 font-black text-2xl">
-              <CountUp
-                end={detections}
-                duration={0.3}
-                preserveValue={true}
-              />
-            </span>
+
+          <div className="flex flex-col gap-1">
+            <div className="text-lg text-white/90 uppercase tracking-[0.6em] font-black">{config.primary}</div>
+            <div className="text-[10px] text-white/40 font-mono font-bold tracking-widest leading-none">{config.primary}_DATA_LINK</div>
+            <div className="text-xl text-white/40 font-black mt-1">{config.unit}</div>
+          </div>
+        </div>
+
+        {/* Real-time Sub-Metrics Block */}
+        <div className="flex flex-col gap-4 font-mono text-[12px] tracking-[0.2em]">
+          <div className="flex items-center">
+            <div className="w-1.5 h-12 bg-cyan-500 shadow-[0_0_15px_rgba(6,182,212,0.6)]" />
+            <div className="flex justify-between items-center w-64 bg-black/60 backdrop-blur-md px-4 py-2 border-r border-white/10">
+              <span className="text-white/40 uppercase font-black">Vehicles</span>
+              <span className="text-cyan-400 font-bold text-2xl">
+                <CountUp end={detections} duration={0.4} preserveValue={true} />
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center">
+            <div className="w-1.5 h-12 bg-cyan-500 shadow-[0_0_15px_rgba(6,182,212,0.6)]" />
+            <div className="flex justify-between items-center w-64 bg-black/60 backdrop-blur-md px-4 py-2 border-r border-white/10">
+              <span className="text-white/40 uppercase font-black">Density</span>
+              <span className="text-cyan-400 font-bold text-2xl">
+                <CountUp end={density} duration={0.4} preserveValue={true} />%
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center">
+            <div className="w-1.5 h-12 bg-cyan-500 shadow-[0_0_15px_rgba(6,182,212,0.6)]" />
+            <div className="flex justify-between items-center w-64 bg-black/60 backdrop-blur-md px-4 py-2 border-r border-white/10">
+              <span className="text-white/40 uppercase font-black">FPS Output</span>
+              <span className="text-cyan-400 font-bold text-2xl">
+                <CountUp end={fps} duration={0.4} preserveValue={true} />
+              </span>
+            </div>
           </div>
         </div>
       </div>
 
-      {/* Right-side Analytics */}
       <div
-        className="absolute right-8 top-[42%] -translate-y-1/2 flex flex-col items-end gap-6 pointer-events-none origin-right"
+        className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-3 pointer-events-none origin-right"
         style={{ transform: `scale(${scale})` }}
       >
+        <div className="flex flex-col items-end text-right gap-1 order-1">
+          <div className="text-lg text-white/90 uppercase tracking-[0.6em] font-black">{config.secondary}</div>
+          <div className="text-[10px] text-white/40 font-mono font-bold uppercase">Dynamic_Grid_LVL</div>
+          <div className="text-7xl font-black font-mono leading-none text-white/90 mt-2 drop-shadow-[0_0_20px_rgba(255,255,255,0.2)]">
+            <CountUp end={congestion} duration={0.5} preserveValue={true} />%
+          </div>
+        </div>
 
-
-        {/* Congestion Index */}
-        <div className="bg-black/70 backdrop-blur-md rounded-lg p-5 border border-emerald-500/30 text-right">
-          <div className="text-sm text-emerald-400 font-mono font-bold tracking-wider mb-2">{config.secondary}</div>
-          <div
-            className="text-7xl font-black font-mono drop-shadow-[0_0_20px_currentColor]"
-            style={{ color: getCongestionColor(congestion) }}
-          >
-            <CountUp
-              end={congestion}
-              duration={0.5}
-              preserveValue={true}
+        <div className="relative h-64 w-3 bg-white/5 overflow-hidden border-r border-white/10 flex flex-col order-2">
+          <div className="flex-1 w-full relative bg-red-500/5 border-b border-white/5">
+            <motion.div
+              className="absolute bottom-0 w-full bg-red-500 shadow-[0_0_15px_rgba(239,68,68,0.4)]"
+              animate={{ height: `${stalled}%` }}
+              transition={{ type: "spring", stiffness: 50 }}
+            />
+          </div>
+          <div className="flex-1 w-full relative bg-orange-500/5 border-b border-white/5">
+            <motion.div
+              className="absolute bottom-0 w-full bg-orange-500 shadow-[0_0_15px_rgba(249,115,22,0.4)]"
+              animate={{ height: `${slow}%` }}
+              transition={{ type: "spring", stiffness: 50 }}
+            />
+          </div>
+          <div className="flex-1 w-full relative bg-yellow-500/5 border-b border-white/5">
+            <motion.div
+              className="absolute bottom-0 w-full bg-yellow-500 shadow-[0_0_15px_rgba(234,179,8,0.4)]"
+              animate={{ height: `${medium}%` }}
+              transition={{ type: "spring", stiffness: 50 }}
+            />
+          </div>
+          <div className="flex-1 w-full relative bg-emerald-500/5">
+            <motion.div
+              className="absolute bottom-0 w-full bg-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.4)]"
+              animate={{ height: `${fast}%` }}
+              transition={{ type: "spring", stiffness: 50 }}
             />
           </div>
         </div>
-
-        {/* Speed Distribution */}
-        <div className="flex flex-col gap-3 bg-black/50 backdrop-blur-md rounded-lg p-4 border border-white/10">
-          <div className="flex items-center justify-between gap-6">
-            <span className="text-red-400 font-mono text-sm font-bold">STALLED</span>
-            <span className="text-red-300 font-black text-xl">
-              <CountUp end={metrics?.stalled_pct || 0} duration={0.3} preserveValue={true} />
-            </span>
-          </div>
-          <div className="flex items-center justify-between gap-6">
-            <span className="text-orange-400 font-mono text-sm font-bold">SLOW</span>
-            <span className="text-orange-300 font-black text-xl">
-              <CountUp end={metrics?.slow_pct || 0} duration={0.3} preserveValue={true} />
-            </span>
-          </div>
-          <div className="flex items-center justify-between gap-6">
-            <span className="text-yellow-400 font-mono text-sm font-bold">MEDIUM</span>
-            <span className="text-yellow-300 font-black text-xl">
-              <CountUp end={metrics?.medium_pct || 0} duration={0.3} preserveValue={true} />
-            </span>
-          </div>
-          <div className="flex items-center justify-between gap-6">
-            <span className="text-emerald-400 font-mono text-sm font-bold">FAST</span>
-            <span className="text-emerald-300 font-black text-xl">
-              <CountUp end={metrics?.fast_pct || 0} duration={0.3} preserveValue={true} />
-            </span>
-          </div>
-        </div>
       </div>
 
-      {/* Status Label */}
       <div
-        className="absolute bottom-2 right-8 pointer-events-none origin-right z-10"
+        className="absolute bottom-6 right-6 pointer-events-none origin-right z-10"
         style={{ transform: `scale(${scale})` }}
       >
-
-
-        <div className={`px-6 py-3 border-r-[8px] ${borderColor} bg-black/80 backdrop-blur-md transform skew-x-[-12deg] rounded-l-lg`}>
-          <div className={`text-xl font-black uppercase tracking-[0.3em] ${color} skew-x-[12deg] drop-shadow-[0_0_10px_currentColor]`}>
+        <div className={`px-4 py-2 border-r-[6px] ${borderColor} bg-black/50 backdrop-blur-md transform skew-x-[-12deg]`}>
+          <div className={`text-sm font-black uppercase tracking-[0.2em] ${color} skew-x-[12deg]`}>
             {config.statusLabel}: {status}
           </div>
         </div>
       </div>
-    </motion.div>
+    </>
   );
 };
 
-const VideoCell = ({
-  video,
-  index,
-  total,
-  getAnalyticsScale,
-  useCase,
-  position,
-  size,
-  onPositionChange,
-  onSizeChange,
-  onBringToFront,
-  zIndex
-}) => {
+const VideoCell = ({ video, index, total, getAnalyticsScale, getVideoClass, useCase }) => {
   const [isCellLoading, setIsCellLoading] = useState(true);
-  const [overlayState, setOverlayState] = useState({
-    heatmap: false,
-    trails: false,
-    bboxes: false,
-  });
-
-  // Zoom state for video content
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [isZoomDragging, setIsZoomDragging] = useState(false);
-  const [zoomDragStart, setZoomDragStart] = useState({ x: 0, y: 0 });
-
-  // Cell drag state
-  const [isCellDragging, setIsCellDragging] = useState(false);
-  const [cellDragStart, setCellDragStart] = useState({ x: 0, y: 0 });
-
-  // Resize state
-  const [isResizing, setIsResizing] = useState(false);
-  const [resizeHandle, setResizeHandle] = useState(null);
-  const [resizeStart, setResizeStart] = useState({ x: 0, y: 0, width: 0, height: 0 });
-
-  const containerRef = React.useRef(null);
+  const [overlays, setOverlays] = useState({ heatmap: true, trails: true, bboxes: true });
 
   useEffect(() => {
     const timer = setTimeout(() => setIsCellLoading(false), 2500);
     return () => clearTimeout(timer);
   }, []);
 
+  // Fetch initial overlay state
   useEffect(() => {
-    const overlayKey = video.overlayKey || video.stream;
-    if (!overlayKey) return;
-    fetch(`${API_BASE_URL}/overlays/${overlayKey}`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data) {
-          setOverlayState({
-            heatmap: !!data.heatmap,
-            trails: !!data.trails,
-            bboxes: !!data.bboxes,
-          });
+    const fetchOverlay = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/overlays/${video.id}`);
+        if (res.ok) {
+          const data = await res.json();
+          setOverlays(data);
         }
-      })
-      .catch(() => { });
-  }, [video.stream, video.overlayKey]);
+      } catch (e) { }
+    };
+    fetchOverlay();
+  }, [video.id]);
 
-  const updateOverlay = (next) => {
-    const overlayKey = video.overlayKey || video.stream;
-    if (!overlayKey) return;
-    setOverlayState(next);
-    fetch(`${API_BASE_URL}/overlays/${overlayKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(next),
-    }).catch(() => { });
-  };
+  const toggleOverlay = async (type) => {
+    const nextValue = !overlays[type];
+    const updated = { ...overlays, [type]: nextValue };
+    setOverlays(updated);
 
-  const toggleOverlay = (key) => {
-    updateOverlay({ ...overlayState, [key]: !overlayState[key] });
-  };
-
-  // === Cell Drag Handlers ===
-  const handleCellDragStart = (e) => {
-    if (e.target.closest('.resize-handle') || e.target.closest('.no-drag')) return;
-    e.preventDefault();
-    e.stopPropagation();
-    onBringToFront?.();
-    setIsCellDragging(true);
-    setCellDragStart({ x: e.clientX - position.x, y: e.clientY - position.y });
-  };
-
-  const handleCellDragMove = (e) => {
-    if (isCellDragging) {
-      const newX = Math.max(0, e.clientX - cellDragStart.x);
-      const newY = Math.max(0, e.clientY - cellDragStart.y);
-      onPositionChange?.({ x: newX, y: newY });
-    }
-    if (isResizing && resizeHandle) {
-      const deltaX = e.clientX - resizeStart.x;
-      const deltaY = e.clientY - resizeStart.y;
-      let newWidth = resizeStart.width;
-      let newHeight = resizeStart.height;
-      let newX = position.x;
-      let newY = position.y;
-
-      if (resizeHandle.includes('e')) newWidth = Math.max(300, resizeStart.width + deltaX);
-      if (resizeHandle.includes('w')) {
-        newWidth = Math.max(300, resizeStart.width - deltaX);
-        newX = position.x + (resizeStart.width - newWidth);
-      }
-      if (resizeHandle.includes('s')) newHeight = Math.max(200, resizeStart.height + deltaY);
-      if (resizeHandle.includes('n')) {
-        newHeight = Math.max(200, resizeStart.height - deltaY);
-        newY = position.y + (resizeStart.height - newHeight);
-      }
-
-      onSizeChange?.({ width: newWidth, height: newHeight });
-      if (resizeHandle.includes('w') || resizeHandle.includes('n')) {
-        onPositionChange?.({ x: newX, y: newY });
-      }
-    }
-    // Zoom pan
-    if (isZoomDragging && zoom > 1) {
-      const newX = e.clientX - zoomDragStart.x;
-      const newY = e.clientY - zoomDragStart.y;
-      const maxPan = (zoom - 1) * 150;
-      setPan({
-        x: Math.max(-maxPan, Math.min(maxPan, newX)),
-        y: Math.max(-maxPan, Math.min(maxPan, newY))
+    try {
+      await fetch(`${API_BASE_URL}/overlays/${video.id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ [type]: nextValue }),
       });
+    } catch (e) {
+      console.error('Failed to update overlay:', e);
     }
   };
 
-  const handleCellDragEnd = () => {
-    setIsCellDragging(false);
-    setIsResizing(false);
-    setResizeHandle(null);
-    setIsZoomDragging(false);
-  };
-
-  // === Resize Handlers ===
-  const handleResizeStart = (e, handle) => {
-    e.preventDefault();
-    e.stopPropagation();
-    onBringToFront?.();
-    setIsResizing(true);
-    setResizeHandle(handle);
-    setResizeStart({ x: e.clientX, y: e.clientY, width: size.width, height: size.height });
-  };
-
-  // === Zoom Handlers ===
-  const handleZoomClick = (e) => {
-    if (isCellDragging || isResizing || isZoomDragging) return;
-    e.stopPropagation();
-    setZoom(prev => prev >= 3 ? 1 : prev + 0.5);
-    if (zoom >= 3) setPan({ x: 0, y: 0 });
-  };
-
-  const handleZoomPanStart = (e) => {
-    if (zoom <= 1 || e.target.closest('.no-drag')) return;
-    e.preventDefault();
-    setIsZoomDragging(true);
-    setZoomDragStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
-  };
-
-  const handleWheel = (e) => {
-    e.preventDefault();
-    const delta = e.deltaY > 0 ? -0.25 : 0.25;
-    setZoom(prev => Math.max(1, Math.min(4, prev + delta)));
-    if (zoom + delta <= 1) setPan({ x: 0, y: 0 });
-  };
-
-  const resetView = (e) => {
-    e.stopPropagation();
-    setZoom(1);
-    setPan({ x: 0, y: 0 });
-  };
-
-  // Global mouse events for drag/resize
-  useEffect(() => {
-    if (isCellDragging || isResizing || isZoomDragging) {
-      const handleGlobalMove = (e) => handleCellDragMove(e);
-      const handleGlobalUp = () => handleCellDragEnd();
-      window.addEventListener('mousemove', handleGlobalMove);
-      window.addEventListener('mouseup', handleGlobalUp);
-      return () => {
-        window.removeEventListener('mousemove', handleGlobalMove);
-        window.removeEventListener('mouseup', handleGlobalUp);
-      };
-    }
-  }, [isCellDragging, isResizing, isZoomDragging, cellDragStart, resizeStart, zoomDragStart]);
-
-  // Determine video source - use HLS stream for 'live' or fallback to static file
   const isLiveStream = video.type === 'hls';
   const isWebRTCStream = video.type === 'webrtc';
   const hlsSrc = isLiveStream ? `${HLS_BASE_URL}/${video.stream}/index.m3u8` : null;
-  const processedStream = video.processedStream;
-  const webrtcPrimaryStream = isWebRTCStream && processedStream ? processedStream : video.stream;
-  const webrtcFallbackStream = isWebRTCStream && processedStream && processedStream !== video.stream
-    ? video.stream
-    : null;
-  const webrtcSrc = isWebRTCStream ? `${WEBRTC_BASE_URL}/${webrtcPrimaryStream}/whep` : null;
-  const webrtcFallbackSrc = webrtcFallbackStream
-    ? `${WEBRTC_BASE_URL}/${webrtcFallbackStream}/whep`
-    : null;
+  const webrtcSrc = isWebRTCStream ? `${WEBRTC_BASE_URL}/${video.processedStream || video.stream}/whep` : null;
   const fallbackSrc = video.fallback || (video.type === 'static' ? `/${video.id}` : null);
 
-  const videoStyle = {
-    transform: `scale(${zoom}) translate(${pan.x / zoom}px, ${pan.y / zoom}px)`,
-    transition: isZoomDragging ? 'none' : 'transform 0.3s ease-out',
-    cursor: zoom > 1 ? (isZoomDragging ? 'grabbing' : 'grab') : 'zoom-in',
+  const maskStyle = {
+    maskImage: 'linear-gradient(to right, transparent 0%, black 12%, black 88%, transparent 100%), linear-gradient(to bottom, transparent 0%, black 12%, black 88%, transparent 100%)',
+    maskComposite: 'intersect',
+    WebkitMaskComposite: 'source-in'
   };
 
   return (
-    <div
-      ref={containerRef}
-      className="absolute overflow-hidden group border border-emerald-500/30 rounded-lg shadow-lg shadow-emerald-500/10"
-      style={{
-        left: position.x,
-        top: position.y,
-        width: size.width,
-        height: size.height,
-        zIndex: zIndex,
-      }}
-      onWheel={handleWheel}
-      onClick={() => onBringToFront?.()}
-    >
-      <AnimatePresence>
-        {isCellLoading && <IRISLoader />}
-      </AnimatePresence>
+    <div className={`relative overflow-hidden group ${getVideoClass(index, total)}`}>
+      <AnimatePresence>{isCellLoading && <IRISLoader />}</AnimatePresence>
 
-      {/* Drag Handle - Top Bar */}
-      <div
-        className="absolute top-0 left-0 right-0 h-8 bg-gradient-to-b from-black/80 to-transparent z-30 cursor-move flex items-center px-3 gap-2"
-        onMouseDown={handleCellDragStart}
-      >
-        <div className="flex gap-1">
-          <div className="w-2 h-2 rounded-full bg-emerald-500/60" />
-          <div className="w-2 h-2 rounded-full bg-emerald-500/40" />
-          <div className="w-2 h-2 rounded-full bg-emerald-500/20" />
-        </div>
-        <span className="text-[10px] font-mono text-emerald-400/80 font-bold tracking-wider">
-          {video.label || `DRONE ${index + 1}`}
-        </span>
-      </div>
+      {/* Tactical Cyberpunk Brackets */}
+      <div className="absolute top-0 left-0 w-8 h-8 border-t-2 border-l-2 border-cyan-500/50 z-20 pointer-events-none" />
+      <div className="absolute top-0 right-0 w-8 h-8 border-t-2 border-r-2 border-cyan-500/50 z-20 pointer-events-none" />
+      <div className="absolute bottom-0 left-0 w-8 h-8 border-b-2 border-l-2 border-cyan-500/50 z-20 pointer-events-none" />
+      <div className="absolute bottom-0 right-0 w-8 h-8 border-b-2 border-r-2 border-cyan-500/50 z-20 pointer-events-none" />
 
-      {/* Tactical Emerald Brackets */}
-      <div className="absolute top-0 left-0 w-10 h-10 border-t-2 border-l-2 border-emerald-500/60 z-20 pointer-events-none" />
-      <div className="absolute top-0 right-0 w-10 h-10 border-t-2 border-r-2 border-emerald-500/60 z-20 pointer-events-none" />
-      <div className="absolute bottom-0 left-0 w-10 h-10 border-b-2 border-l-2 border-emerald-500/60 z-20 pointer-events-none" />
-      <div className="absolute bottom-0 right-0 w-10 h-10 border-b-2 border-r-2 border-emerald-500/60 z-20 pointer-events-none" />
-
-      {/* Resize Handles */}
-      <div className="resize-handle absolute top-0 left-0 w-4 h-4 cursor-nw-resize z-40 hover:bg-emerald-500/30" onMouseDown={(e) => handleResizeStart(e, 'nw')} />
-      <div className="resize-handle absolute top-0 right-0 w-4 h-4 cursor-ne-resize z-40 hover:bg-emerald-500/30" onMouseDown={(e) => handleResizeStart(e, 'ne')} />
-      <div className="resize-handle absolute bottom-0 left-0 w-4 h-4 cursor-sw-resize z-40 hover:bg-emerald-500/30" onMouseDown={(e) => handleResizeStart(e, 'sw')} />
-      <div className="resize-handle absolute bottom-0 right-0 w-4 h-4 cursor-se-resize z-40 hover:bg-emerald-500/30" onMouseDown={(e) => handleResizeStart(e, 'se')} />
-      <div className="resize-handle absolute top-0 left-4 right-4 h-2 cursor-n-resize z-40 hover:bg-emerald-500/20" onMouseDown={(e) => handleResizeStart(e, 'n')} />
-      <div className="resize-handle absolute bottom-0 left-4 right-4 h-2 cursor-s-resize z-40 hover:bg-emerald-500/20" onMouseDown={(e) => handleResizeStart(e, 's')} />
-      <div className="resize-handle absolute left-0 top-4 bottom-4 w-2 cursor-w-resize z-40 hover:bg-emerald-500/20" onMouseDown={(e) => handleResizeStart(e, 'w')} />
-      <div className="resize-handle absolute right-0 top-4 bottom-4 w-2 cursor-e-resize z-40 hover:bg-emerald-500/20" onMouseDown={(e) => handleResizeStart(e, 'e')} />
-
-      {/* Overlay toggles */}
-      <div className="no-drag absolute top-1 right-3 z-30 flex items-center gap-2 bg-black/60 border border-emerald-500/30 rounded-md px-2 py-1 backdrop-blur-sm">
-        <button
-          onClick={() => toggleOverlay('heatmap')}
-          className={`text-[10px] font-mono font-bold uppercase px-2 py-1 rounded transition-all ${overlayState.heatmap ? 'bg-emerald-500 text-black shadow-[0_0_10px_rgba(16,185,129,0.5)]' : 'text-white/50 hover:text-emerald-400 hover:bg-emerald-500/10'
-            }`}
-        >
-          H
-        </button>
-        <button
-          onClick={() => toggleOverlay('trails')}
-          className={`text-[10px] font-mono font-bold uppercase px-2 py-1 rounded transition-all ${overlayState.trails ? 'bg-emerald-500 text-black shadow-[0_0_10px_rgba(16,185,129,0.5)]' : 'text-white/50 hover:text-emerald-400 hover:bg-emerald-500/10'
-            }`}
-        >
-          T
-        </button>
-        <button
-          onClick={() => toggleOverlay('bboxes')}
-          className={`text-[10px] font-mono font-bold uppercase px-2 py-1 rounded transition-all ${overlayState.bboxes ? 'bg-emerald-500 text-black shadow-[0_0_10px_rgba(16,185,129,0.5)]' : 'text-white/50 hover:text-emerald-400 hover:bg-emerald-500/10'
-            }`}
-        >
-          B
-        </button>
-        {zoom > 1 && (
+      {/* Overlay Toggles (Top Right) */}
+      <div className="absolute top-6 right-8 z-30 flex gap-2 pointer-events-auto">
+        {[
+          { id: 'heatmap', label: 'H_MAP' },
+          { id: 'trails', label: 'TRLS' },
+          { id: 'bboxes', label: 'BOX' }
+        ].map((btn) => (
           <button
-            onClick={resetView}
-            className="text-[10px] font-mono font-bold uppercase px-2 py-1 rounded text-white/50 hover:text-emerald-400 hover:bg-emerald-500/10 transition-all ml-1 border-l border-white/10 pl-2"
+            key={btn.id}
+            onClick={() => toggleOverlay(btn.id)}
+            className={`px-3 py-1 text-[9px] font-black uppercase tracking-widest border transition-all duration-300 ${overlays[btn.id]
+              ? 'bg-cyan-500 text-black border-cyan-500 shadow-[0_0_10px_rgba(6,182,212,0.4)]'
+              : 'bg-black/60 text-white/30 border-white/10 hover:border-white/30'
+              }`}
           >
-            {zoom.toFixed(1)}x
+            {btn.label}
           </button>
-        )}
+        ))}
       </div>
 
-      {/* Video container with zoom/pan */}
-      <div
-        className="w-full h-full"
-        onClick={handleZoomClick}
-        onMouseDown={handleZoomPanStart}
-      >
-        {isWebRTCStream ? (
-          <WebRTCVideo
-            src={webrtcSrc}
-            fallbackWebrtcSrc={webrtcFallbackSrc}
-            fallbackSrc={fallbackSrc}
-            autoPlay
-            muted
-            playsInline
-            className="w-full h-full object-cover opacity-100"
-            style={videoStyle}
-          />
-        ) : isLiveStream ? (
-          <HLSVideo
-            src={hlsSrc}
-            fallbackSrc={fallbackSrc}
-            autoPlay
-            muted
-            playsInline
-            className="w-full h-full object-cover opacity-100"
-            style={videoStyle}
-          />
-        ) : (
-          <video
-            src={fallbackSrc}
-            autoPlay
-            loop
-            muted
-            playsInline
-            className="w-full h-full object-cover opacity-100"
-            style={videoStyle}
-          />
-        )}
-      </div>
+      {/* Inner corner accents */}
+      <div className="absolute top-4 left-4 w-2 h-2 border-t border-l border-white/20 z-20 pointer-events-none" />
+      <div className="absolute top-4 right-4 w-2 h-2 border-t border-r border-white/20 z-20 pointer-events-none" />
+      <div className="absolute bottom-4 left-4 w-2 h-2 border-b border-l border-white/20 z-20 pointer-events-none" />
+      <div className="absolute bottom-4 right-4 w-2 h-2 border-b border-r border-white/20 z-20 pointer-events-none" />
+
+      {isWebRTCStream ? (
+        <img
+          src={`${API_BASE_URL}/stream/${video.id}`}
+          className="w-full h-full object-cover"
+          style={maskStyle}
+          onError={(e) => {
+            e.target.src = fallbackSrc;
+          }}
+        />
+      ) : isLiveStream ? (
+        <HLSVideo src={hlsSrc} fallbackSrc={fallbackSrc} className="w-full h-full object-cover" autoPlay muted playsInline style={maskStyle} />
+      ) : (
+        <video src={fallbackSrc} autoPlay loop muted playsInline className="w-full h-full object-cover opacity-100" style={maskStyle} />
+      )}
 
       {/* Vertical Camera Analytics Overlay */}
       <CameraAnalytics scale={getAnalyticsScale(total)} camIndex={index} useCase={useCase} videoId={video.id} />
 
-      {/* Video Label - Bottom Positioned */}
-      <div className="absolute bottom-6 left-6 font-mono text-sm text-white/90 uppercase tracking-[0.5em] font-black drop-shadow-lg z-10 transition-all duration-300">
-        {isLiveStream || isWebRTCStream ? 'LIVE' : `CAM ${index + 1}`}
-        <div className={`w-8 h-0.5 mt-1 opacity-50 ${isLiveStream || isWebRTCStream ? 'bg-red-500' : 'bg-emerald-500'}`}></div>
-      </div>
-
-      {/* Zoom indicator */}
-      {zoom > 1 && (
-        <div className="absolute bottom-6 right-6 z-20 bg-black/60 backdrop-blur-sm border border-emerald-500/30 rounded px-2 py-1">
-          <span className="text-emerald-400 font-mono text-xs font-bold">{zoom.toFixed(1)}x ZOOM</span>
-        </div>
-      )}
 
     </div>
   );
@@ -626,281 +359,58 @@ const Dashboard = () => {
   const theme = themes[useCase] || themes.traffic;
 
   const STATIC_DRONES = [
-    { id: 'bcpdrone1', type: 'webrtc', stream: 'bcpdrone1', processedStream: 'processed_bcpdrone1', overlayKey: 'bcpdrone1', droneIndex: 1, label: 'DRONE 1' },
-    { id: 'bcpdrone2', type: 'webrtc', stream: 'bcpdrone2', processedStream: 'processed_bcpdrone2', overlayKey: 'bcpdrone2', droneIndex: 2, label: 'DRONE 2' },
-    { id: 'bcpdrone3', type: 'webrtc', stream: 'bcpdrone3', processedStream: 'processed_bcpdrone3', overlayKey: 'bcpdrone3', droneIndex: 3, label: 'DRONE 3' },
-    { id: 'bcpdrone4', type: 'webrtc', stream: 'bcpdrone4', processedStream: 'processed_bcpdrone4', overlayKey: 'bcpdrone4', droneIndex: 4, label: 'DRONE 4' },
-    { id: 'bcpdrone5', type: 'webrtc', stream: 'bcpdrone5', processedStream: 'processed_bcpdrone5', overlayKey: 'bcpdrone5', droneIndex: 5, label: 'DRONE 5' },
-    { id: 'bcpdrone6', type: 'webrtc', stream: 'bcpdrone6', processedStream: 'processed_bcpdrone6', overlayKey: 'bcpdrone6', droneIndex: 6, label: 'DRONE 6' },
-    { id: 'bcpdrone7', type: 'webrtc', stream: 'bcpdrone7', processedStream: 'processed_bcpdrone7', overlayKey: 'bcpdrone7', droneIndex: 7, label: 'DRONE 7' },
-    { id: 'bcpdrone8', type: 'webrtc', stream: 'bcpdrone8', processedStream: 'processed_bcpdrone8', overlayKey: 'bcpdrone8', droneIndex: 8, label: 'DRONE 8' },
-    { id: 'bcpdrone9', type: 'webrtc', stream: 'bcpdrone9', processedStream: 'processed_bcpdrone9', overlayKey: 'bcpdrone9', droneIndex: 9, label: 'DRONE 9' },
-    { id: 'bcpdrone10', type: 'webrtc', stream: 'bcpdrone10', processedStream: 'processed_bcpdrone10', overlayKey: 'bcpdrone10', droneIndex: 10, label: 'DRONE 10' },
-    { id: 'bcpdrone11', type: 'webrtc', stream: 'bcpdrone11', processedStream: 'processed_bcpdrone11', overlayKey: 'bcpdrone11', droneIndex: 11, label: 'DRONE 11' },
-    { id: 'bcpdrone12', type: 'webrtc', stream: 'bcpdrone12', processedStream: 'processed_bcpdrone12', overlayKey: 'bcpdrone12', droneIndex: 12, label: 'DRONE 12' },
+    { id: 'bcpdrone1', type: 'webrtc', stream: 'bcpdrone1', processedStream: 'processed_bcpdrone1', droneIndex: 1, label: 'DRONE 1' },
+    { id: 'bcpdrone2', type: 'webrtc', stream: 'bcpdrone2', processedStream: 'processed_bcpdrone2', droneIndex: 2, label: 'DRONE 2' },
+    { id: 'bcpdrone3', type: 'webrtc', stream: 'bcpdrone3', processedStream: 'processed_bcpdrone3', droneIndex: 3, label: 'DRONE 3' },
+    { id: 'bcpdrone4', type: 'webrtc', stream: 'bcpdrone4', processedStream: 'processed_bcpdrone4', droneIndex: 4, label: 'DRONE 4' },
+    { id: 'bcpdrone5', type: 'webrtc', stream: 'bcpdrone5', processedStream: 'processed_bcpdrone5', droneIndex: 5, label: 'DRONE 5' },
+    { id: 'bcpdrone6', type: 'webrtc', stream: 'bcpdrone6', processedStream: 'processed_bcpdrone6', droneIndex: 6, label: 'DRONE 6' },
+    { id: 'bcpdrone7', type: 'webrtc', stream: 'bcpdrone7', processedStream: 'processed_bcpdrone7', droneIndex: 7, label: 'DRONE 7' },
+    { id: 'bcpdrone8', type: 'webrtc', stream: 'bcpdrone8', processedStream: 'processed_bcpdrone8', droneIndex: 8, label: 'DRONE 8' },
+    { id: 'bcpdrone9', type: 'webrtc', stream: 'bcpdrone9', processedStream: 'processed_bcpdrone9', droneIndex: 9, label: 'DRONE 9' },
+    { id: 'bcpdrone10', type: 'webrtc', stream: 'bcpdrone10', processedStream: 'processed_bcpdrone10', droneIndex: 10, label: 'DRONE 10' },
+    { id: 'bcpdrone11', type: 'webrtc', stream: 'bcpdrone11', processedStream: 'processed_bcpdrone11', droneIndex: 11, label: 'DRONE 11' },
+    { id: 'bcpdrone12', type: 'webrtc', stream: 'bcpdrone12', processedStream: 'processed_bcpdrone12', droneIndex: 12, label: 'DRONE 12' },
   ];
 
-  // Video sources state
   const [allVideos, setAllVideos] = useState(STATIC_DRONES);
-
-  const fetchSources = async () => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/sources`);
-      if (res.ok) {
-        const data = await res.json();
-        const sources = data.sources.map((srcObj) => {
-          const url = srcObj.url || '';
-          const name = srcObj.name || '';
-          const isDrone = url.includes('bcpdrone') || name.includes('bcpdrone');
-
-          let id = name;
-          let label = 'SOURCE';
-          let overlayKey = name;
-
-          if (isDrone) {
-            const match = name.match(/bcpdrone(\d+)/) || url.match(/bcpdrone(\d+)/);
-            if (match) {
-              const num = match[1];
-              id = `bcpdrone${num}`;
-              label = `DRONE ${num}`;
-              overlayKey = `bcpdrone${num}`;
-            }
-          } else {
-            const fileStem = name.split('.')[0];
-            id = fileStem.replace(/[^\w-]/g, '_');
-            label = `UPLOADED`;
-            overlayKey = fileStem;
-          }
-
-          return {
-            id,
-            type: 'webrtc',
-            stream: overlayKey,
-            processedStream: `processed_${overlayKey}`,
-            overlayKey,
-            droneIndex: srcObj.index,
-            label,
-            src: url
-          };
-        });
-
-        setAllVideos(prev => {
-          const combined = [...STATIC_DRONES];
-          sources.forEach(s => {
-            if (!combined.some(v => v.id === s.id)) {
-              combined.push(s);
-            }
-          });
-          return combined;
-        });
-      }
-    } catch (e) {
-      console.error("Failed to fetch sources", e);
-    }
-  };
-
-  useEffect(() => {
-    fetchSources();
-  }, []);
-
   const [selectedVideos, setSelectedVideos] = useState([]);
-  const [initialLoadDone, setInitialLoadDone] = useState(false);
 
-  // Auto-select first drone if none selected AND trigger backend processing
-  useEffect(() => {
-    if (!initialLoadDone && selectedVideos.length === 0 && allVideos.length > 0) {
-      const firstVideo = allVideos[0];
-      setSelectedVideos([firstVideo]);
-      // Start processing for the initially selected drone
-      if (firstVideo.droneIndex) {
-        startDroneProcessing(firstVideo.droneIndex);
-      }
-      setInitialLoadDone(true);
-    }
-  }, [allVideos, selectedVideos.length, initialLoadDone]);
-
-  // Video layout state - position and size for each video
-  const [videoLayouts, setVideoLayouts] = useState({});
-  const [maxZIndex, setMaxZIndex] = useState(1);
-  const containerRef = React.useRef(null);
-
-  // Calculate optimal grid layout based on video count
-  const calculateGridLayout = (count, containerWidth, containerHeight) => {
-    const padding = 12;
-    const gap = 12;
-    let cols, rows;
-
-    // Match the original grid layout logic
+  const getGridLayout = (count) => {
     switch (count) {
-      case 1:
-        cols = 1; rows = 1;
-        break;
-      case 2:
-        cols = 2; rows = 1;
-        break;
+      case 1: return 'grid-cols-1 grid-rows-1';
+      case 2: return 'grid-cols-2 grid-rows-1';
       case 3:
-      case 4:
-        cols = 2; rows = 2;
-        break;
+      case 4: return 'grid-cols-2 grid-rows-2';
       case 5:
-      case 6:
-        cols = 3; rows = 2;
-        break;
-      default:
-        cols = 3; rows = Math.ceil(count / 3);
+      case 6: return 'grid-cols-3 grid-rows-2';
+      default: return 'grid-cols-3 grid-rows-3';
     }
-
-    const cellWidth = Math.floor((containerWidth - padding * 2 - gap * (cols - 1)) / cols);
-    const cellHeight = Math.floor((containerHeight - padding * 2 - gap * (rows - 1)) / rows);
-
-    return { cols, rows, cellWidth, cellHeight, padding, gap };
-  };
-
-  // Function to apply grid layout
-  const applyGridLayout = () => {
-    if (!containerRef.current || selectedVideos.length === 0) return;
-
-    const container = containerRef.current.getBoundingClientRect();
-    if (container.width === 0 || container.height === 0) return;
-
-    const { cols, cellWidth, cellHeight, padding, gap } = calculateGridLayout(
-      selectedVideos.length,
-      container.width,
-      container.height
-    );
-
-    const newLayouts = {};
-    selectedVideos.forEach((video, idx) => {
-      const col = idx % cols;
-      const row = Math.floor(idx / cols);
-      newLayouts[video.id] = {
-        x: padding + col * (cellWidth + gap),
-        y: padding + row * (cellHeight + gap),
-        width: cellWidth,
-        height: cellHeight,
-        zIndex: idx + 1
-      };
-    });
-
-    setVideoLayouts(newLayouts);
-    setMaxZIndex(selectedVideos.length);
-  };
-
-  // Initialize layout when videos change
-  useEffect(() => {
-    // Small delay to ensure container is rendered
-    const timer = setTimeout(applyGridLayout, 100);
-    return () => clearTimeout(timer);
-  }, [selectedVideos]);
-
-  // Handle window resize - auto arrange on resize
-  useEffect(() => {
-    let resizeTimer;
-    const handleResize = () => {
-      clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(applyGridLayout, 200);
-    };
-
-    window.addEventListener('resize', handleResize);
-    return () => {
-      window.removeEventListener('resize', handleResize);
-      clearTimeout(resizeTimer);
-    };
-  }, [selectedVideos]);
-
-  // Handle video selection changes - start/stop backend processing
-  const handleVideosChange = (newSelectedVideos) => {
-    const oldIds = new Set(selectedVideos.map(v => v.id));
-    const newIds = new Set(newSelectedVideos.map(v => v.id));
-
-    // Start processing for newly selected drones
-    newSelectedVideos.forEach(video => {
-      if (!oldIds.has(video.id) && video.droneIndex) {
-        startDroneProcessing(video.droneIndex);
-      }
-    });
-
-    // Stop processing for deselected drones
-    selectedVideos.forEach(video => {
-      if (!newIds.has(video.id) && video.droneIndex) {
-        stopDroneProcessing(video.droneIndex);
-      }
-    });
-
-    setSelectedVideos(newSelectedVideos);
-  };
-
-  const handlePositionChange = (videoId, newPosition) => {
-    setVideoLayouts(prev => ({
-      ...prev,
-      [videoId]: { ...prev[videoId], ...newPosition }
-    }));
-  };
-
-  const handleSizeChange = (videoId, newSize) => {
-    setVideoLayouts(prev => ({
-      ...prev,
-      [videoId]: { ...prev[videoId], ...newSize }
-    }));
-  };
-
-  const handleBringToFront = (videoId) => {
-    setMaxZIndex(prev => prev + 1);
-    setVideoLayouts(prev => ({
-      ...prev,
-      [videoId]: { ...prev[videoId], zIndex: maxZIndex + 1 }
-    }));
   };
 
   const getAnalyticsScale = (count) => {
-    if (count <= 1) return 1.0;
-    if (count === 2) return 0.8;
-    if (count <= 4) return 0.6;
+    if (count <= 1) return 1.2;
+    if (count === 2) return 0.85;
+    if (count <= 4) return 0.65;
     return 0.5;
   };
 
-  // Auto-arrange videos in grid (resets to default layout)
-  const autoArrange = () => {
-    if (!containerRef.current || selectedVideos.length === 0) return;
-    const container = containerRef.current.getBoundingClientRect();
-
-    const { cols, cellWidth, cellHeight, padding, gap } = calculateGridLayout(
-      selectedVideos.length,
-      container.width,
-      container.height
-    );
-
-    const newLayouts = {};
-    selectedVideos.forEach((video, idx) => {
-      const col = idx % cols;
-      const row = Math.floor(idx / cols);
-      newLayouts[video.id] = {
-        x: padding + col * (cellWidth + gap),
-        y: padding + row * (cellHeight + gap),
-        width: cellWidth,
-        height: cellHeight,
-        zIndex: idx + 1
-      };
-    });
-    setVideoLayouts(newLayouts);
-    setMaxZIndex(selectedVideos.length);
+  const getVideoClass = (index, total) => {
+    if (index === 0) {
+      if (total === 3) return 'col-span-2';
+      if (total === 5) return 'col-span-2';
+      if (total === 7) return 'col-span-3';
+    }
+    return '';
   };
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="flex-1 flex"
-    >
-      {/* Main Content Area */}
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex-1 flex">
       <div className="flex-1 flex flex-col relative overflow-hidden">
-        {/* Header */}
         <Header onReset={() => navigate('/')} useCase={useCase} />
         <LeftPanel />
 
-        {/* Main Video Area - Free-form Layout */}
-        <div ref={containerRef} className="flex-1 relative overflow-hidden">
+        <div className="flex-1 relative overflow-hidden">
           <div className="absolute inset-0 z-0 opacity-40 pointer-events-none"
             style={{
               backgroundImage: `linear-gradient(${theme.grid} 1px, transparent 1px), linear-gradient(90deg, ${theme.grid} 1px, transparent 1px)`,
@@ -909,54 +419,29 @@ const Dashboard = () => {
           </div>
           <div className="absolute inset-0 z-0 opacity-10 pointer-events-none bg-[radial-gradient(circle_at_center,transparent_0%,#000_100%)]"></div>
           <div className="absolute inset-0 z-0 pointer-events-none"
-            style={{
-              background: `radial-gradient(circle_at_center, transparent 40%, ${theme.glow} 100%)`
-            }}
+            style={{ background: `radial-gradient(circle_at_center, transparent 40%, ${theme.glow} 100%)` }}
           ></div>
 
-          {/* Auto-arrange button */}
-          {selectedVideos.length > 1 && (
-            <button
-              onClick={autoArrange}
-              className="absolute top-4 left-4 z-50 px-3 py-2 bg-black/60 border border-emerald-500/30 rounded-md backdrop-blur-sm text-emerald-400 text-xs font-mono font-bold hover:bg-emerald-500/20 transition-all"
-            >
-              AUTO ARRANGE
-            </button>
-          )}
-
-          {/* Video cells with absolute positioning */}
-          <div className="absolute inset-0">
-            {selectedVideos.map((video, index) => {
-              const layout = videoLayouts[video.id] || { x: 50 + index * 50, y: 50 + index * 50, width: 500, height: 350, zIndex: index + 1 };
-              return (
+          <div className="absolute inset-0 z-0 flex items-center justify-center">
+            <div className={`w-full h-full grid gap-6 p-8 ${getGridLayout(selectedVideos.length)}`}>
+              {selectedVideos.map((video, index) => (
                 <VideoCell
                   key={video.id}
                   video={video}
                   index={index}
                   total={selectedVideos.length}
                   getAnalyticsScale={getAnalyticsScale}
+                  getVideoClass={getVideoClass}
                   useCase={useCase}
-                  position={{ x: layout.x, y: layout.y }}
-                  size={{ width: layout.width, height: layout.height }}
-                  zIndex={layout.zIndex}
-                  onPositionChange={(pos) => handlePositionChange(video.id, pos)}
-                  onSizeChange={(size) => handleSizeChange(video.id, size)}
-                  onBringToFront={() => handleBringToFront(video.id)}
                 />
-              );
-            })}
+              ))}
+            </div>
           </div>
 
           <div className="absolute inset-0 z-0 bg-[radial-gradient(circle_at_center,transparent_0%,rgba(0,0,0,0.6)_100%)] pointer-events-none"></div>
         </div>
 
-        {/* Footer */}
-        <Footer
-          selectedVideos={selectedVideos}
-          onVideosChange={handleVideosChange}
-          videos={allVideos}
-          onRefresh={fetchSources}
-        />
+        <Footer selectedVideos={selectedVideos} onVideosChange={setSelectedVideos} videos={allVideos} />
       </div>
 
       <RightPanel useCase={useCase} sources={allVideos} />
@@ -973,7 +458,7 @@ const AppContents = () => {
   }
 
   return (
-    <div className="relative w-screen h-screen bg-[#050a14] overflow-hidden selection:bg-emerald-500/30 font-mono flex">
+    <div className="relative w-screen h-screen bg-[#050a14] overflow-hidden selection:bg-cyan-500/30 font-mono flex">
       <AnimatePresence mode="wait">
         <Routes location={location} key={location.pathname}>
           <Route path="/" element={<WelcomeScreen key="welcome" />} />

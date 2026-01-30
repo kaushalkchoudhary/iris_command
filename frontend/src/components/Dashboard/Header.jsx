@@ -1,116 +1,59 @@
-import React, { useEffect, useState } from 'react';
-// Map drone id → region name (shared with RightPanel)
+import React from 'react';
+import { Shield, Clock, Cloud, Signal } from 'lucide-react';
 
-/* ============================
-   TYPEWRITER HOOK
-============================ */
-const useTypewriter = (text, speed = 60, resetKey = 0) => {
-  const [output, setOutput] = useState('');
-  const [index, setIndex] = useState(0);
+const Header = ({ useCase, onReset }) => {
+    const useCaseLabels = {
+        traffic: 'Traffic Intelligence',
+        crowd: 'Crowd Analytics',
+        safety: 'Public Safety',
+        perimeter: 'Perimeter Security'
+    };
 
-  useEffect(() => {
-    setOutput('');
-    setIndex(0);
-  }, [resetKey, text]);
+    return (
+        <div className="relative w-full z-50 p-6 pb-2 flex justify-between items-start pointer-events-none select-none">
+            {/* Brand */}
+            <div className="flex items-center gap-4 pointer-events-auto">
+                <button
+                    onClick={onReset}
+                    className="group flex items-center gap-4 text-left hover:opacity-80 transition-opacity"
+                >
+                    <Shield className="w-10 h-10 text-cyan-400" strokeWidth={1.5} />
+                    <div>
+                        <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-500 tracking-[0.2em] uppercase">
+                            IRIS COMMAND
+                        </h1>
+                        <div className="flex items-center gap-2 mt-1">
+                            <span className="px-2 py-0.5 bg-cyan-500 text-black text-[10px] font-black uppercase tracking-widest rounded leading-none">
+                                {useCaseLabels[useCase] || 'MISSION_ACTIVE'}
+                            </span>
+                            <span className="text-[10px] text-cyan-300/50 uppercase tracking-[0.2em] ml-1">
+                                [ Click to Switch Mission ]
+                            </span>
+                        </div>
+                    </div>
+                </button>
+            </div>
 
-  useEffect(() => {
-    if (index >= text.length) return;
-    const t = setTimeout(() => {
-      setOutput((prev) => prev + text[index]);
-      setIndex((i) => i + 1);
-    }, speed);
-    return () => clearTimeout(t);
-  }, [index, text, speed]);
-
-  return output;
-};
-
-/* ============================
-   TECH SENSOR ICON
-============================ */
-const SensorCore = () => {
-  return (
-    <div className="relative w-5 h-5 flex items-center justify-center">
-      <div className="absolute inset-0 rounded-full border border-emerald-400/25 animate-[spin_12s_linear_infinite]" />
-      <div className="absolute inset-[3px] rounded-full border border-dashed border-emerald-400/30 animate-[spin_6s_linear_reverse_infinite]" />
-      <div className="relative w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]">
-        <div className="absolute inset-0 rounded-full bg-emerald-400/40 animate-ping" />
-      </div>
-    </div>
-  );
-};
-
-/* ============================
-   HEADER
-============================ */
-const Header = ({ onReset }) => {
-  const CALLSIGN = 'IRIS';
-  const FULL_FORM = 'INTELLIGENT RECONNAISSANCE & INSIGHT SYSTEM';
-
-  const [cycle, setCycle] = useState(0);
-  const [showFullForm, setShowFullForm] = useState(false);
-
-  // Toggle every 3 seconds
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setShowFullForm((v) => !v);
-      setCycle((c) => c + 1);
-    }, 3000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const irisText = useTypewriter(CALLSIGN, 120, cycle);
-  const fullFormText = useTypewriter(FULL_FORM, 28, cycle);
-
-  return (
-    <header
-      className="
-        w-full z-50 px-5 py-2
-        flex items-center justify-between
-        bg-[#050a14]/90 backdrop-blur-xl
-        border-b border-emerald-500/15
-        select-none font-mono
-      "
-    >
-      {/* BRAND */}
-      <button
-        onClick={onReset}
-        className="flex items-center gap-3 pointer-events-auto
-                   hover:opacity-85 transition-opacity"
-      >
-        {/* TECH SENSOR ICON */}
-        <SensorCore />
-
-        {/* SINGLE LINE BRAND */}
-        <div className="flex items-center gap-3 h-5 overflow-hidden">
-          {/* IRIS */}
-          <span className="text-lg font-black tracking-[0.45em] text-emerald-400 whitespace-nowrap">
-            {irisText}
-            <span
-              className="inline-block w-[1px] h-4 ml-1
-                         bg-emerald-400/70
-                         animate-pulse align-middle"
-            />
-          </span>
-
-          {/* FULL FORM — APPEARS BESIDE */}
-          <span
-            className={`
-              text-[10px] tracking-widest whitespace-nowrap
-              text-emerald-400/40
-              transition-all duration-700
-              ${showFullForm ? 'opacity-100 max-w-[420px]' : 'opacity-0 max-w-0'}
-            `}
-          >
-            {fullFormText}
-          </span>
+            {/* Decorative / Stats */}
+            <div className="flex items-center gap-8 pointer-events-auto text-cyan-400 font-mono text-sm">
+                <div className="flex flex-col items-end">
+                    <div className="flex items-center gap-2 text-white">
+                        <Clock className="w-4 h-4 text-cyan-500" />
+                        <span>15:20:59</span>
+                    </div>
+                    <span className="text-[10px] text-cyan-500/60 uppercase">System Time</span>
+                </div>
+                <div className="h-8 w-[1px] bg-cyan-500/20"></div>
+                <div className="flex flex-col items-end">
+                    <div className="flex items-center gap-2 text-white">
+                        <Cloud className="w-4 h-4 text-cyan-500" />
+                        <span>32°C</span>
+                    </div>
+                    <span className="text-[10px] text-cyan-500/60 uppercase">Temperature</span>
+                </div>
+            </div>
         </div>
-      </button>
-
-      {/* RIGHT — intentionally empty */}
-      <div className="w-6" />
-    </header>
-  );
+    );
 };
 
 export default Header;

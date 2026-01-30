@@ -4,8 +4,10 @@ import shutil
 import threading
 from typing import Dict, List, Optional
 from pathlib import Path
+import multiprocessing as mp
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -25,6 +27,10 @@ overlays: Dict[str, Dict[str, bool]] = {}
 
 metrics_lock = threading.Lock()
 metrics: Dict[str, dict] = {}
+
+frame_lock = threading.Condition()
+frame_buffer: Dict[str, bytes] = {}
+frame_sequences: Dict[str, int] = {}
 
 jobs_lock = threading.Lock()
 jobs: Dict[str, dict] = {}
@@ -71,6 +77,12 @@ def get_overlay_state(stream: str) -> Dict[str, bool]:
 def update_metrics(stream: str, data: dict):
     with metrics_lock:
         metrics[stream] = data
+
+def update_frame(stream: str, jpeg_data: bytes):
+    with frame_lock:
+        frame_buffer[stream] = jpeg_data
+        frame_sequences[stream] = frame_sequences.get(stream, 0) + 1
+        frame_lock.notify_all()
 
 def get_all_metrics():
     with metrics_lock:
@@ -160,12 +172,12 @@ def start_source(req: SourceIndexRequest):
         name = source_display_name(url)
         ensure_overlay(name)
 
-        stop = threading.Event()
-        thread = start_source_callback(req.index, url, stop, name)
-        running_sources[req.index] = {"thread": thread, "stop": stop}
+        stop = mp.Event()
+        process = start_source_callback(req.index, url, stop, name)
+        running_sources[req.index] = {"process": process, "stop": stop}
 
-    cfg.setdefault("active_sources", []).append(req.index)
-    cfg["active_sources"] = sorted(set(cfg["active_sources"]))
+    # Mark only this source as active in config
+    cfg["active_sources"] = [req.index]
     save_rtsp_config(cfg)
     return {"status": "started", "index": req.index}
 
@@ -184,6 +196,31 @@ def stop_source(req: SourceIndexRequest):
 @app.get("/api/metrics")
 def get_metrics():
     return get_all_metrics()
+
+@app.get("/api/stream/{name}")
+def stream_video(name: str):
+    def generate():
+        last_seq = -1
+        while True:
+            with frame_lock:
+                # Wait for a new frame if the current sequence matches what we last sent
+                while frame_sequences.get(name, 0) <= last_seq:
+                    # Timeout every 1s to allow checking for connection closure
+                    if not frame_lock.wait(timeout=1.0):
+                        break
+                
+                frame = frame_buffer.get(name)
+                last_seq = frame_sequences.get(name, 0)
+            
+            if frame:
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+            else:
+                # Fallback to prevent infinite loop on empty buffer
+                import time
+                time.sleep(0.1)
+
+    return StreamingResponse(generate(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 @app.get("/api/jobs")
 def list_jobs():
@@ -210,7 +247,7 @@ async def upload_video(file: UploadFile = File(...)):
     with open(target, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    stop = threading.Event()
+    stop = mp.Event()
     start_upload_callback(str(target), stop, name)
 
     with jobs_lock:
@@ -241,24 +278,6 @@ def run_control_server(start_source_fn, start_upload_fn, initial_overlays):
     # Initialize overlays for all configured sources
     for url in rtsp_links:
         ensure_overlay(source_display_name(url))
-
-    # Auto-start active sources from config (like Rust backend does)
-    active_sources = cfg.get("active_sources", [])
-    if active_sources and start_source_fn:
-        print(f"[*] Auto-starting {len(active_sources)} active source(s): {active_sources}")
-        for idx in active_sources:
-            if idx < 1 or idx > len(rtsp_links):
-                print(f"[!] Invalid source index {idx}, skipping")
-                continue
-            url = rtsp_links[idx - 1]
-            name = source_display_name(url)
-            ensure_overlay(name)
-
-            stop = threading.Event()
-            thread = start_source_fn(idx, url, stop, name)
-            with source_lock:
-                running_sources[idx] = {"thread": thread, "stop": stop}
-            print(f"[+] Started source {idx}: {name}")
 
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=9010)
