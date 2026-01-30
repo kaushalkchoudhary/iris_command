@@ -14,23 +14,26 @@ from control_server import (
     run_control_server,
     update_metrics,
     update_frame,
+    update_raw_frame,
     get_overlay_state,
     ensure_overlay,
     add_alert,
 )
 
 # Shared communication objects
+spawn_ctx = None
 frame_queue = None
+raw_frame_queue = None
 metrics_queue = None
 alert_queue = None
 overlay_shared_dict = None
 
 # Alert settings
-CONGESTION_ALERT_THRESHOLD = 70  # Trigger alert when congestion >= this value
+CONGESTION_ALERT_THRESHOLD = 40  # Trigger alert when congestion >= this value
 
 
-def relay_worker(stop_event, f_q, m_q, a_q):
-    """Relay metrics, frames, and alerts from multiprocess queues to control server."""
+def relay_worker(stop_event, f_q, m_q, a_q, rf_q):
+    """Relay metrics, frames, raw frames, and alerts from multiprocess queues to control server."""
     while not stop_event.is_set():
         try:
             for _ in range(30):
@@ -38,6 +41,16 @@ def relay_worker(stop_event, f_q, m_q, a_q):
                     break
                 name, data = f_q.get_nowait()
                 update_frame(name, data)
+        except:
+            pass
+
+        # Relay raw frames for SAM
+        try:
+            for _ in range(30):
+                if rf_q.empty():
+                    break
+                name, data = rf_q.get_nowait()
+                update_raw_frame(name, data)
         except:
             pass
 
@@ -73,9 +86,14 @@ MODEL_PATH_CROWD = "data/best_head.pt"
 TARGET_FPS = 30
 
 # Inference settings
-INFERENCE_SIZE = 480  # Smaller inference = faster
-SKIP_FRAMES = 1  # Process every Nth frame (1 = all, 2 = every other)
-JPEG_QUALITY = 75  # Lower = faster encoding
+INFERENCE_SIZE = 320  # Smaller inference = less GPU memory + faster
+SKIP_FRAMES = 1  # Process every frame for smooth tracking
+JPEG_QUALITY = 70  # Lower = faster encoding
+MAX_DET = 100  # Max detections per frame
+BBOX_SMOOTH_ALPHA = 0.45  # EMA smoothing for bbox positions (lower = smoother, higher = snappier)
+
+# GPU memory budget: cap each YOLO process so SAM3 has room
+YOLO_GPU_MEMORY_FRACTION = 0.35  # Each YOLO process gets at most 35% of GPU
 
 # Drones that use crowd counting model
 CROWD_DRONES = {"bcpdrone10", "bcpdrone12"}
@@ -449,18 +467,53 @@ class HeatmapRenderer:
             frame[mask] = cv2.addWeighted(frame[mask], 0.45, colored_full[mask], 0.55, 0)
 
 
-def process_stream(index, name, url, stop_event, f_q, m_q, a_q, overlay_dict):
+class BboxSmoother:
+    """EMA-smooth bounding box positions per track ID to reduce jitter."""
+
+    def __init__(self, alpha=BBOX_SMOOTH_ALPHA):
+        self.alpha = alpha
+        self.smoothed = {}  # tid -> [x1, y1, x2, y2] as floats
+
+    def smooth(self, tracked_detections):
+        """Smooth bbox positions in-place on the detections object. Returns smoothed xyxy copy."""
+        if tracked_detections is None or tracked_detections.tracker_id is None:
+            self.smoothed.clear()
+            return None
+
+        xyxys = tracked_detections.xyxy
+        tids = tracked_detections.tracker_id
+        smoothed_xyxy = xyxys.copy().astype(np.float64)
+
+        active_ids = set()
+        for i in range(len(tids)):
+            tid = tids[i]
+            active_ids.add(tid)
+            raw = xyxys[i].astype(np.float64)
+
+            if tid in self.smoothed:
+                prev = self.smoothed[tid]
+                s = prev * (1.0 - self.alpha) + raw * self.alpha
+                self.smoothed[tid] = s
+                smoothed_xyxy[i] = s
+            else:
+                self.smoothed[tid] = raw
+                smoothed_xyxy[i] = raw
+
+        # Remove stale tracks
+        stale = [t for t in self.smoothed if t not in active_ids]
+        for t in stale:
+            del self.smoothed[t]
+
+        return smoothed_xyxy
+
+
+def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_dict):
     print(f"[+] Starting optimized inference: {name}")
 
-    # CUDA setup
-    device = "cpu"
-    half_precision = False
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        device = "cuda"
-        half_precision = True
-        torch.backends.cudnn.benchmark = True
+    # Pre-allocate JPEG encoding params
+    encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
 
+    # ── 1. Connect to RTSP immediately and start pushing raw frames ──
     cap = FrameCapture(url)
     if not cap.isOpened():
         print(f"[!] Failed to open source: {name}")
@@ -470,14 +523,45 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, overlay_dict):
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     src_fps = cap.get(cv2.CAP_PROP_FPS) or 25
 
+    # Push raw frames while model loads so the feed shows instantly
+    print(f"[+] {name}: streaming raw frames while model loads...")
+    raw_frame_count = 0
+    while not stop_event.is_set() and raw_frame_count < 200:
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            time.sleep(0.005)
+            continue
+        raw_frame_count += 1
+        # Push every 3rd raw frame to keep the feed alive without flooding
+        if raw_frame_count % 3 == 0:
+            ret_enc, buffer = cv2.imencode(".jpg", frame, encode_params)
+            if ret_enc:
+                try:
+                    if f_q.full():
+                        try: f_q.get_nowait()
+                        except: pass
+                    f_q.put_nowait((name, buffer.tobytes()))
+                except: pass
+        # Break out early once we've pushed a few frames and can start loading model
+        if raw_frame_count >= 6:
+            break
+
+    # ── 2. Load model (frames already visible in frontend) ──
+    device = "cpu"
+    half_precision = False
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.set_per_process_memory_fraction(YOLO_GPU_MEMORY_FRACTION)
+        device = "cuda"
+        half_precision = True
+        torch.backends.cudnn.benchmark = True
+
     is_crowd = name in CROWD_DRONES
     model_path = MODEL_PATH_CROWD if is_crowd else MODEL_PATH_VEHICLE
 
-    # Load model with optimizations
     model = YOLO(model_path, task="detect")
     if device == "cuda":
         model.to(device)
-        # Note: Don't call model.model.half() here - let predict() handle FP16 via half= parameter
 
     target_classes = None if is_crowd else [3, 4, 5, 7, 8, 9]
     CLASS_NAMES = {0: "head"} if is_crowd else {
@@ -485,16 +569,22 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, overlay_dict):
     }
     conf_thresh = 0.25 if is_crowd else 0.15
 
-    tracker = sv.ByteTrack(frame_rate=int(src_fps))
+    tracker = sv.ByteTrack(
+        frame_rate=int(src_fps),
+        track_activation_threshold=0.2,
+        lost_track_buffer=45,
+        minimum_matching_threshold=0.75,
+        minimum_consecutive_frames=3,
+    )
     trail_renderer = TrailRenderer(max_len=20)
     heatmap_renderer = HeatmapRenderer(max_len=12)
+    bbox_smoother = BboxSmoother(alpha=BBOX_SMOOTH_ALPHA)
     analytics = AnalyticsState(w, h, src_fps)
+
+    print(f"[+] {name}: model loaded, switching to processed frames")
 
     last_metrics_time = time.time()
     frame_count = 0
-
-    # Pre-allocate JPEG encoding params
-    encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
 
     # For accurate FPS calculation with smoothing
     fps_times = []
@@ -504,6 +594,7 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, overlay_dict):
     cached_overlay = {"heatmap": True, "trails": True, "bboxes": True}
     last_overlay_check = 0
 
+    # ── 3. Main inference loop ──
     while cap.isOpened() and not stop_event.is_set():
         frame_start = time.time()
 
@@ -559,7 +650,7 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, overlay_dict):
             frame,
             imgsz=INFERENCE_SIZE,
             conf=conf_thresh,
-            max_det=300,
+            max_det=MAX_DET,
             verbose=False,
             classes=target_classes,
             half=half_precision and device == "cuda",
@@ -597,6 +688,16 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, overlay_dict):
                 except:
                     pass
 
+        # Send raw frame (before overlays) for SAM forensics
+        ret_raw, raw_buf = cv2.imencode(".jpg", frame, encode_params)
+        if ret_raw:
+            try:
+                if rf_q.full():
+                    try: rf_q.get_nowait()
+                    except: pass
+                rf_q.put_nowait((name, raw_buf.tobytes()))
+            except: pass
+
         # Render overlays
         out = frame
 
@@ -608,14 +709,14 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, overlay_dict):
         if overlay.get("trails", True):
             trail_renderer.render(out, current_ids)
 
-        # Bounding boxes - minimal
+        # Bounding boxes - smoothed
         if overlay.get("bboxes", True) and tracked is not None and tracked.tracker_id is not None:
-            xyxys = tracked.xyxy
+            smoothed_xyxy = bbox_smoother.smooth(tracked)
             tids = tracked.tracker_id
             class_ids = tracked.class_id
 
             for i in range(len(tids)):
-                x1, y1, x2, y2 = map(int, xyxys[i])
+                x1, y1, x2, y2 = map(int, smoothed_xyxy[i])
                 tid = tids[i]
 
                 # Thin yellow box
@@ -630,6 +731,8 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, overlay_dict):
                 # Label position
                 ly = y1 - 4 if y1 > 15 else y2 + 12
                 cv2.putText(out, label, (x1, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
+        else:
+            bbox_smoother.smooth(tracked)  # Keep smoother state updated even if not rendering
 
         # Encode and send frame
         ret_enc, buffer = cv2.imencode(".jpg", out, encode_params)
@@ -651,42 +754,38 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, overlay_dict):
         torch.cuda.empty_cache()
 
 
-def start_backend(idx, url, stop, name):
+def start_backend(idx, url, name):
     overlay_shared_dict[name] = get_overlay_state(name)
-    p = mp.Process(
+    stop = spawn_ctx.Event()
+    p = spawn_ctx.Process(
         target=process_stream,
-        args=(idx, name, url, stop, frame_queue, metrics_queue, alert_queue, overlay_shared_dict),
+        args=(idx, name, url, stop, frame_queue, metrics_queue, alert_queue, raw_frame_queue, overlay_shared_dict),
         daemon=True,
     )
     p.start()
-    return p
+    return p, stop
 
 
-def start_upload_backend(file_path, stop, name):
+def start_upload_backend(file_path, name):
     """Start inference on an uploaded video file."""
     overlay_shared_dict[name] = get_overlay_state(name)
-    p = mp.Process(
+    stop = spawn_ctx.Event()
+    p = spawn_ctx.Process(
         target=process_upload_stream,
-        args=(name, file_path, stop, frame_queue, metrics_queue, alert_queue, overlay_shared_dict),
+        args=(name, file_path, stop, frame_queue, metrics_queue, alert_queue, raw_frame_queue, overlay_shared_dict),
         daemon=True,
     )
     p.start()
-    return p
+    return p, stop
 
 
-def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, overlay_dict):
+def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, overlay_dict):
     """Process an uploaded video file with inference - loops the video."""
     print(f"[+] Starting upload inference: {name} from {file_path}")
 
-    # CUDA setup
-    device = "cpu"
-    half_precision = False
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        device = "cuda"
-        half_precision = True
-        torch.backends.cudnn.benchmark = True
+    encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
 
+    # ── 1. Open file and push raw frames instantly ──
     cap = cv2.VideoCapture(file_path)
     if not cap.isOpened():
         print(f"[!] Failed to open uploaded file: {file_path}")
@@ -697,23 +796,56 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, overlay_di
     src_fps = cap.get(cv2.CAP_PROP_FPS) or 25
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    # Load model
+    # Push raw frames while model loads
+    print(f"[+] {name}: streaming raw frames while model loads...")
+    for _ in range(6):
+        if stop_event.is_set():
+            break
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            break
+        ret_enc, buffer = cv2.imencode(".jpg", frame, encode_params)
+        if ret_enc:
+            try:
+                if f_q.full():
+                    try: f_q.get_nowait()
+                    except: pass
+                f_q.put_nowait((name, buffer.tobytes()))
+            except: pass
+
+    # ── 2. Load model (feed already visible) ──
+    device = "cpu"
+    half_precision = False
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.set_per_process_memory_fraction(YOLO_GPU_MEMORY_FRACTION)
+        device = "cuda"
+        half_precision = True
+        torch.backends.cudnn.benchmark = True
+
     model = YOLO(MODEL_PATH_VEHICLE, task="detect")
     if device == "cuda":
         model.to(device)
-        # Note: Don't call model.model.half() here - let predict() handle FP16 via half= parameter
+
+    print(f"[+] {name}: model loaded, switching to processed frames")
 
     target_classes = [3, 4, 5, 7, 8, 9]
     CLASS_NAMES = {3: "car", 4: "van", 5: "truck", 7: "bus", 8: "motor", 9: "bicycle"}
     conf_thresh = 0.15
 
-    tracker = sv.ByteTrack(frame_rate=int(src_fps))
+    tracker = sv.ByteTrack(
+        frame_rate=int(src_fps),
+        track_activation_threshold=0.2,
+        lost_track_buffer=45,
+        minimum_matching_threshold=0.75,
+        minimum_consecutive_frames=3,
+    )
     trail_renderer = TrailRenderer(max_len=20)
     heatmap_renderer = HeatmapRenderer(max_len=12)
+    bbox_smoother = BboxSmoother(alpha=BBOX_SMOOTH_ALPHA)
     analytics = AnalyticsState(w, h, src_fps)
 
     last_metrics_time = time.time()
-    encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
 
     # FPS control - match source FPS
     frame_interval = 1.0 / src_fps
@@ -776,7 +908,7 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, overlay_di
             frame,
             imgsz=INFERENCE_SIZE,
             conf=conf_thresh,
-            max_det=300,
+            max_det=MAX_DET,
             verbose=False,
             classes=target_classes,
             half=half_precision and device == "cuda",
@@ -813,6 +945,16 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, overlay_di
                 except:
                     pass
 
+        # Send raw frame (before overlays) for SAM forensics
+        ret_raw, raw_buf = cv2.imencode(".jpg", frame, encode_params)
+        if ret_raw:
+            try:
+                if rf_q.full():
+                    try: rf_q.get_nowait()
+                    except: pass
+                rf_q.put_nowait((name, raw_buf.tobytes()))
+            except: pass
+
         # Render overlays
         out = frame
 
@@ -825,12 +967,12 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, overlay_di
             trail_renderer.render(out, current_ids)
 
         if overlay.get("bboxes", True) and tracked is not None and tracked.tracker_id is not None:
-            xyxys = tracked.xyxy
+            smoothed_xyxy = bbox_smoother.smooth(tracked)
             tids = tracked.tracker_id
             class_ids = tracked.class_id
 
             for i in range(len(tids)):
-                x1, y1, x2, y2 = map(int, xyxys[i])
+                x1, y1, x2, y2 = map(int, smoothed_xyxy[i])
                 tid = tids[i]
                 # Thin yellow box
                 cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 255), 1)
@@ -840,6 +982,8 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, overlay_di
                     label += f" {cls_name}"
                 ly = y1 - 4 if y1 > 15 else y2 + 12
                 cv2.putText(out, label, (x1, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
+        else:
+            bbox_smoother.smooth(tracked)
 
         # Encode and send frame
         ret_enc, buffer = cv2.imencode(".jpg", out, encode_params)
@@ -867,17 +1011,19 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, overlay_di
 
 
 def main():
-    global overlay_shared_dict, frame_queue, metrics_queue, alert_queue
+    global spawn_ctx, overlay_shared_dict, frame_queue, raw_frame_queue, metrics_queue, alert_queue
     ctx = mp.get_context("spawn")
+    spawn_ctx = ctx
 
     manager = ctx.Manager()
     overlay_shared_dict = manager.dict()
     frame_queue = ctx.Queue(maxsize=15)
+    raw_frame_queue = ctx.Queue(maxsize=15)
     metrics_queue = ctx.Queue(maxsize=10)
     alert_queue = ctx.Queue(maxsize=10)
 
     stop_relay = threading.Event()
-    relay_t = threading.Thread(target=relay_worker, args=(stop_relay, frame_queue, metrics_queue, alert_queue), daemon=True)
+    relay_t = threading.Thread(target=relay_worker, args=(stop_relay, frame_queue, metrics_queue, alert_queue, raw_frame_queue), daemon=True)
     relay_t.start()
 
     try:

@@ -105,4 +105,11 @@ py_backend/data/iris_command_vit_l_0b3195.pth
 py_backend/data/iris_command_vit_b_01ec64.pth
 py_backend/data/iris_command_resnet50.pth
 py_backend/data/uploaded_videos/
-crowdanalysis.zipcrowdanalysis.zip
+crowdanalysis.zip
+py_backend/data/alerts/*
+py_backend/data/reports/*
+py_backend/data/drone_footage/*
+py_backend/data/uploads 
+sam.zip
+jetson@10.0.4.226
+sam/

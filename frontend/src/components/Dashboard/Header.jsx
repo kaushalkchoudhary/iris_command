@@ -30,7 +30,7 @@ const Header = ({ useCase, onReset, onLogout }) => {
                     <Shield className="w-10 h-10 text-cyan-400" strokeWidth={1.5} />
                     <div>
                         <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-500 tracking-[0.2em] uppercase">
-                            IRIS COMMAND
+                            IRIS
                         </h1>
                         <div className="flex items-center gap-2 mt-1">
                             <span className="px-2 py-0.5 bg-cyan-500 text-black text-[10px] font-black uppercase tracking-widest rounded leading-none">

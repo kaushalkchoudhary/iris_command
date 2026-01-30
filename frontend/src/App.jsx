@@ -8,14 +8,9 @@ import RightPanel from './components/Dashboard/RightPanel';
 import Footer from './components/Dashboard/Footer';
 import IRISLoader from './components/Dashboard/IRISLoader';
 import WelcomeScreen from './components/Dashboard/WelcomeScreen';
-import HLSVideo from './components/UI/HLSVideo';
-import WebRTCVideo from './components/UI/WebRTCVideo';
 import Login from './Login';
 import LeftPanel from './components/Dashboard/LeftPanel';
 
-// MediaMTX stream configuration
-const HLS_BASE_URL = import.meta.env.DEV ? '/hls' : `http://${window.location.hostname}:8888`;
-const WEBRTC_BASE_URL = import.meta.env.DEV ? '/webrtc' : `http://${window.location.hostname}:8889`;
 const API_BASE_URL = import.meta.env.DEV ? '/api' : `http://${window.location.hostname}:9010`;
 
 // Start processing a drone on the backend
@@ -287,11 +282,6 @@ const VideoCell = ({ video, index, total, getAnalyticsScale, getVideoClass, useC
     }
   };
 
-  const isLiveStream = video.type === 'hls';
-  const isWebRTCStream = video.type === 'webrtc';
-  const isUploadStream = video.type === 'upload';
-  const hlsSrc = isLiveStream ? `${HLS_BASE_URL}/${video.stream}/index.m3u8` : null;
-  const webrtcSrc = isWebRTCStream ? `${WEBRTC_BASE_URL}/${video.processedStream || video.stream}/whep` : null;
   const fallbackSrc = video.fallback || (video.type === 'static' ? `/${video.id}` : null);
 
   const maskStyle = {
@@ -340,20 +330,14 @@ const VideoCell = ({ video, index, total, getAnalyticsScale, getVideoClass, useC
       <div className="absolute bottom-4 left-4 w-2 h-2 border-b border-l border-white/20 z-20 pointer-events-none" />
       <div className="absolute bottom-4 right-4 w-2 h-2 border-b border-r border-white/20 z-20 pointer-events-none" />
 
-      {(isWebRTCStream || isUploadStream) ? (
-        <img
-          src={`${API_BASE_URL}/stream/${video.id}`}
-          className="w-full h-full object-cover"
-          style={maskStyle}
-          onError={(e) => {
-            if (fallbackSrc) e.target.src = fallbackSrc;
-          }}
-        />
-      ) : isLiveStream ? (
-        <HLSVideo src={hlsSrc} fallbackSrc={fallbackSrc} className="w-full h-full object-cover" autoPlay muted playsInline style={maskStyle} />
-      ) : (
-        <video src={fallbackSrc} autoPlay loop muted playsInline className="w-full h-full object-cover opacity-100" style={maskStyle} />
-      )}
+      <img
+        src={`${API_BASE_URL}/stream/${video.id}`}
+        className="w-full h-full object-cover"
+        style={maskStyle}
+        onError={(e) => {
+          if (fallbackSrc) e.target.src = fallbackSrc;
+        }}
+      />
 
       {/* Vertical Camera Analytics Overlay */}
       <CameraAnalytics scale={getAnalyticsScale(total)} camIndex={index} useCase={useCase} videoId={video.id} />
@@ -462,7 +446,7 @@ const Dashboard = ({ onLogout }) => {
         <Footer selectedVideos={selectedVideos} onVideosChange={setSelectedVideos} videos={allVideos} />
       </div>
 
-      <RightPanel useCase={useCase} sources={allVideos} />
+      <RightPanel useCase={useCase} sources={allVideos} selectedVideos={selectedVideos} />
     </motion.div>
   );
 }
