@@ -238,13 +238,14 @@ const CameraAnalytics = ({ scale = 1, camIndex = 0, useCase, videoId }) => {
 const VideoCell = ({ video, index, total, getAnalyticsScale, getVideoClass, useCase }) => {
   const [isCellLoading, setIsCellLoading] = useState(true);
   const [overlays, setOverlays] = useState({ heatmap: true, trails: true, bboxes: true });
+  const [isToggling, setIsToggling] = useState(null);
 
   useEffect(() => {
     const timer = setTimeout(() => setIsCellLoading(false), 2500);
     return () => clearTimeout(timer);
   }, []);
 
-  // Fetch initial overlay state
+  // Fetch overlay state on mount and periodically sync
   useEffect(() => {
     const fetchOverlay = async () => {
       try {
@@ -256,26 +257,39 @@ const VideoCell = ({ video, index, total, getAnalyticsScale, getVideoClass, useC
       } catch (e) { }
     };
     fetchOverlay();
+    // Sync every 2 seconds to stay in sync with backend
+    const interval = setInterval(fetchOverlay, 2000);
+    return () => clearInterval(interval);
   }, [video.id]);
 
   const toggleOverlay = async (type) => {
     const nextValue = !overlays[type];
     const updated = { ...overlays, [type]: nextValue };
     setOverlays(updated);
+    setIsToggling(type);
 
     try {
-      await fetch(`${API_BASE_URL}/overlays/${video.id}`, {
+      const res = await fetch(`${API_BASE_URL}/overlays/${video.id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ [type]: nextValue }),
       });
+      if (res.ok) {
+        const data = await res.json();
+        setOverlays(data); // Use server response as source of truth
+      }
     } catch (e) {
       console.error('Failed to update overlay:', e);
+      // Revert on error
+      setOverlays(overlays);
+    } finally {
+      setTimeout(() => setIsToggling(null), 200);
     }
   };
 
   const isLiveStream = video.type === 'hls';
   const isWebRTCStream = video.type === 'webrtc';
+  const isUploadStream = video.type === 'upload';
   const hlsSrc = isLiveStream ? `${HLS_BASE_URL}/${video.stream}/index.m3u8` : null;
   const webrtcSrc = isWebRTCStream ? `${WEBRTC_BASE_URL}/${video.processedStream || video.stream}/whep` : null;
   const fallbackSrc = video.fallback || (video.type === 'static' ? `/${video.id}` : null);
@@ -299,17 +313,21 @@ const VideoCell = ({ video, index, total, getAnalyticsScale, getVideoClass, useC
       {/* Overlay Toggles (Top Right) */}
       <div className="absolute top-6 right-8 z-30 flex gap-2 pointer-events-auto">
         {[
-          { id: 'heatmap', label: 'H_MAP' },
-          { id: 'trails', label: 'TRLS' },
+          { id: 'heatmap', label: 'HEAT' },
+          { id: 'trails', label: 'TRAIL' },
           { id: 'bboxes', label: 'BOX' }
         ].map((btn) => (
           <button
             key={btn.id}
             onClick={() => toggleOverlay(btn.id)}
-            className={`px-3 py-1 text-[9px] font-black uppercase tracking-widest border transition-all duration-300 ${overlays[btn.id]
-              ? 'bg-cyan-500 text-black border-cyan-500 shadow-[0_0_10px_rgba(6,182,212,0.4)]'
-              : 'bg-black/60 text-white/30 border-white/10 hover:border-white/30'
-              }`}
+            disabled={isToggling === btn.id}
+            className={`px-3 py-1 text-[9px] font-black uppercase tracking-widest border transition-all duration-200 ${
+              isToggling === btn.id
+                ? 'bg-white/20 text-white/50 border-white/30 animate-pulse'
+                : overlays[btn.id]
+                  ? 'bg-cyan-500 text-black border-cyan-500 shadow-[0_0_12px_rgba(6,182,212,0.5)] hover:bg-cyan-400'
+                  : 'bg-black/70 text-white/40 border-white/20 hover:border-cyan-500/50 hover:text-white/60'
+            }`}
           >
             {btn.label}
           </button>
@@ -322,13 +340,13 @@ const VideoCell = ({ video, index, total, getAnalyticsScale, getVideoClass, useC
       <div className="absolute bottom-4 left-4 w-2 h-2 border-b border-l border-white/20 z-20 pointer-events-none" />
       <div className="absolute bottom-4 right-4 w-2 h-2 border-b border-r border-white/20 z-20 pointer-events-none" />
 
-      {isWebRTCStream ? (
+      {(isWebRTCStream || isUploadStream) ? (
         <img
           src={`${API_BASE_URL}/stream/${video.id}`}
           className="w-full h-full object-cover"
           style={maskStyle}
           onError={(e) => {
-            e.target.src = fallbackSrc;
+            if (fallbackSrc) e.target.src = fallbackSrc;
           }}
         />
       ) : isLiveStream ? (
@@ -345,7 +363,7 @@ const VideoCell = ({ video, index, total, getAnalyticsScale, getVideoClass, useC
   );
 };
 
-const Dashboard = () => {
+const Dashboard = ({ onLogout }) => {
   const { useCase } = useParams();
   const navigate = useNavigate();
 
@@ -407,7 +425,7 @@ const Dashboard = () => {
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex-1 flex">
       <div className="flex-1 flex flex-col relative overflow-hidden">
-        <Header onReset={() => navigate('/')} useCase={useCase} />
+        <Header onReset={() => navigate('/')} useCase={useCase} onLogout={onLogout} />
         <LeftPanel />
 
         <div className="flex-1 relative overflow-hidden">
@@ -450,11 +468,25 @@ const Dashboard = () => {
 }
 
 const AppContents = () => {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  // Check localStorage for existing session
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    return localStorage.getItem('iris_authenticated') === 'true';
+  });
   const location = useLocation();
 
+  const handleLogin = () => {
+    localStorage.setItem('iris_authenticated', 'true');
+    setIsAuthenticated(true);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('iris_authenticated');
+    localStorage.removeItem('iris_username');
+    setIsAuthenticated(false);
+  };
+
   if (!isAuthenticated) {
-    return <Login onLogin={() => setIsAuthenticated(true)} />;
+    return <Login onLogin={handleLogin} />;
   }
 
   return (
@@ -462,7 +494,7 @@ const AppContents = () => {
       <AnimatePresence mode="wait">
         <Routes location={location} key={location.pathname}>
           <Route path="/" element={<WelcomeScreen key="welcome" />} />
-          <Route path="/:useCase" element={<Dashboard key="dashboard" />} />
+          <Route path="/:useCase" element={<Dashboard key="dashboard" onLogout={handleLogout} />} />
         </Routes>
       </AnimatePresence>
     </div>

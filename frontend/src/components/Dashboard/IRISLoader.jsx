@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import { Shield, Cpu, Activity, Wifi } from 'lucide-react';
 
 const IRISLoader = () => {
@@ -21,22 +21,22 @@ const IRISLoader = () => {
             <div className="absolute inset-0 opacity-20 pointer-events-none"
                 style={{
                     backgroundImage: 'linear-gradient(rgba(0, 255, 255, 0.2) 1px, transparent 1px), linear-gradient(90deg, rgba(0, 255, 255, 0.2) 1px, transparent 1px)',
-                    backgroundSize: '30px 30px'
+                    backgroundSize: '20px 20px'
                 }}>
             </div>
 
-            {/* Scanning Ring */}
+            {/* Compact Scanning Ring */}
             <div className="relative flex items-center justify-center">
                 <motion.div
                     animate={{ rotate: 360 }}
                     transition={{ duration: 4, repeat: Infinity, ease: "linear" }}
-                    className="w-48 h-48 border-4 border-dashed border-cyan-500/20 rounded-full"
+                    className="w-20 h-20 border-2 border-dashed border-cyan-500/20 rounded-full"
                 />
 
                 <motion.div
                     animate={{ rotate: -360 }}
                     transition={{ duration: 8, repeat: Infinity, ease: "linear" }}
-                    className="absolute w-64 h-64 border-t-2 border-b-2 border-cyan-500/30 rounded-full shadow-[0_0_50px_rgba(6,182,212,0.1)]"
+                    className="absolute w-28 h-28 border-t border-b border-cyan-500/30 rounded-full"
                 />
 
                 <motion.div
@@ -44,60 +44,48 @@ const IRISLoader = () => {
                     animate={{ scale: 1, opacity: 1 }}
                     className="absolute flex flex-col items-center"
                 >
-                    <Shield className="w-16 h-16 text-cyan-500 mb-4 drop-shadow-[0_0_15px_rgba(6,182,212,0.5)]" />
-                    <div className="text-4xl font-black text-white tracking-[0.4em] ml-2">IRIS</div>
+                    <Shield className="w-8 h-8 text-cyan-500 drop-shadow-[0_0_10px_rgba(6,182,212,0.5)]" />
                 </motion.div>
             </div>
 
-            {/* Intelligence Diagnostic Text */}
-            <div className="mt-12 w-80">
-                <div className="flex justify-between items-end mb-2">
-                    <div className="flex flex-col">
-                        <span className="text-[10px] text-cyan-500/60 uppercase font-black tracking-widest leading-none mb-1">System Initialization</span>
-                        <span className="font-mono text-[10px] text-white/40 uppercase">Encrypted_Link_Layer: AKTIV</span>
-                    </div>
-                    <span className="font-mono text-xl font-bold text-cyan-400">{Math.round(progress)}%</span>
+            {/* Compact Progress Section */}
+            <div className="mt-4 w-40">
+                <div className="flex justify-between items-center mb-1">
+                    <span className="text-[8px] text-cyan-500/60 uppercase font-black tracking-wider">Initializing</span>
+                    <span className="font-mono text-sm font-bold text-cyan-400">{Math.round(progress)}%</span>
                 </div>
 
-                {/* Progress Bar Container */}
-                <div className="h-1 w-full bg-white/5 rounded-full overflow-hidden border border-white/10 relative">
+                {/* Progress Bar */}
+                <div className="h-0.5 w-full bg-white/5 rounded-full overflow-hidden border border-white/10">
                     <motion.div
-                        className="h-full bg-cyan-500 shadow-[0_0_15px_rgba(6,182,212,0.8)]"
+                        className="h-full bg-cyan-500 shadow-[0_0_10px_rgba(6,182,212,0.8)]"
                         initial={{ width: 0 }}
                         animate={{ width: `${progress}%` }}
                     />
                 </div>
 
-                {/* Sub-Diagnostics */}
-                <div className="grid grid-cols-3 gap-2 mt-4 opacity-50">
-                    <div className="flex items-center gap-2">
-                        <Cpu className="w-3 h-3 text-cyan-500" />
-                        <span className="text-[8px] text-white font-bold uppercase tracking-tighter">Core:04</span>
+                {/* Mini Diagnostics */}
+                <div className="flex justify-between mt-2 opacity-50">
+                    <div className="flex items-center gap-1">
+                        <Cpu className="w-2 h-2 text-cyan-500" />
+                        <span className="text-[7px] text-white font-bold">SYS</span>
                     </div>
-                    <div className="flex items-center gap-2">
-                        <Activity className="w-3 h-3 text-cyan-500" />
-                        <span className="text-[8px] text-white font-bold uppercase tracking-tighter">Syncing</span>
+                    <div className="flex items-center gap-1">
+                        <Activity className="w-2 h-2 text-cyan-500" />
+                        <span className="text-[7px] text-white font-bold">SYNC</span>
                     </div>
-                    <div className="flex items-center gap-2 text-right">
-                        <Wifi className="w-3 h-3 text-cyan-500 ml-auto" />
-                        <span className="text-[8px] text-white font-bold uppercase tracking-tighter">Link+</span>
+                    <div className="flex items-center gap-1">
+                        <Wifi className="w-2 h-2 text-cyan-500" />
+                        <span className="text-[7px] text-white font-bold">LINK</span>
                     </div>
                 </div>
             </div>
 
-            {/* Corner Bracket Frame */}
-            <div className="absolute top-10 left-10 w-24 h-24 border-t-2 border-l-2 border-cyan-500/30" />
-            <div className="absolute top-10 right-10 w-24 h-24 border-t-2 border-r-2 border-cyan-500/30" />
-            <div className="absolute bottom-10 left-10 w-24 h-24 border-b-2 border-l-2 border-cyan-500/30" />
-            <div className="absolute bottom-10 right-10 w-24 h-24 border-b-2 border-r-2 border-cyan-500/30" />
-
-            <motion.div
-                animate={{ opacity: [0.1, 0.4, 0.1] }}
-                transition={{ duration: 2, repeat: Infinity }}
-                className="absolute bottom-10 text-[10px] text-cyan-500 tracking-[0.5em] font-black uppercase"
-            >
-                Authenticating Surveillance Nodes...
-            </motion.div>
+            {/* Small Corner Brackets */}
+            <div className="absolute top-2 left-2 w-6 h-6 border-t border-l border-cyan-500/30" />
+            <div className="absolute top-2 right-2 w-6 h-6 border-t border-r border-cyan-500/30" />
+            <div className="absolute bottom-2 left-2 w-6 h-6 border-b border-l border-cyan-500/30" />
+            <div className="absolute bottom-2 right-2 w-6 h-6 border-b border-r border-cyan-500/30" />
         </div>
     );
 };

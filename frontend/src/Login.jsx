@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
 import { motion } from 'framer-motion';
-import { Shield } from 'lucide-react';
+import { Shield, Lock, User, ChevronRight } from 'lucide-react';
 
 const API_BASE_URL = import.meta.env.DEV
   ? '/api'
   : `http://${window.location.hostname}:9010`;
 
 const Login = ({ onLogin }) => {
-  const [username, setUsername] = useState('admin');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -27,9 +27,10 @@ const Login = ({ onLogin }) => {
       const data = await response.json();
 
       if (response.ok && data.success) {
+        localStorage.setItem('iris_username', data.username || username);
         onLogin();
       } else {
-        setError(data.error || 'Login failed');
+        setError(data.error || 'Invalid credentials');
       }
     } catch {
       setError('Connection error');
@@ -39,144 +40,154 @@ const Login = ({ onLogin }) => {
   };
 
   return (
-    <div className="flex items-center justify-center min-h-screen bg-[#050a14] relative overflow-hidden font-mono">
-      {/* Background Grid */}
+    <div className="fixed inset-0 bg-[#050a14] z-[100] flex flex-col overflow-hidden font-mono">
+      {/* Background Effects - matching WelcomeScreen */}
       <div
-        className="absolute inset-0 opacity-20 pointer-events-none"
+        className="absolute inset-0 z-0 opacity-20 pointer-events-none"
         style={{
           backgroundImage:
-            'linear-gradient(rgba(0,255,255,0.2) 1px, transparent 1px), linear-gradient(90deg, rgba(0,255,255,0.2) 1px, transparent 1px)',
+            'linear-gradient(rgba(0, 255, 255, 0.2) 1px, transparent 1px), linear-gradient(90deg, rgba(0, 255, 255, 0.2) 1px, transparent 1px)',
           backgroundSize: '30px 30px',
         }}
       />
+      <div className="absolute inset-0 z-0 bg-[radial-gradient(circle_at_center,transparent_0%,#000_100%)] opacity-80" />
 
-      <motion.div
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: 1, scale: 1 }}
-        transition={{ duration: 0.5 }}
-        className="w-full max-w-md relative z-10 px-4"
-      >
-        <div className="relative overflow-hidden p-8 bg-black/40 backdrop-blur-xl">
-          
-          {/* IRIS legacy frame */}
-          <div className="pointer-events-none absolute inset-0 z-0">
-            {/* thin faded border */}
-            <div
-              className="absolute inset-0"
-              style={{
-                border: '1px solid rgba(34,211,238,0.35)',
-                maskImage: `
-                  linear-gradient(to right,
-                    transparent 0%,
-                    black 12%,
-                    black 88%,
-                    transparent 100%),
-                  linear-gradient(to bottom,
-                    transparent 0%,
-                    black 12%,
-                    black 88%,
-                    transparent 100%)
-                `,
-                WebkitMaskComposite: 'source-in',
-                maskComposite: 'intersect',
-              }}
-            />
-            
-            {/* soft inner glow */}
-            <div
-              className="absolute inset-0"
-              style={{
-                boxShadow: `
-                  inset 0 0 20px rgba(34,211,238,0.08),
-                  inset 0 0 40px rgba(34,211,238,0.04)
-                `,
-              }}
-            />
+      {/* Top Bar */}
+      <header className="relative z-10 w-full h-20 border-b border-white/5 bg-black/40 backdrop-blur-md flex items-center justify-between px-8">
+        <div className="flex items-center gap-4">
+          <Shield className="w-8 h-8 text-cyan-400" />
+          <span className="text-xl font-black text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-500 tracking-[0.2em] uppercase">
+            IRIS COMMAND
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
+          <span className="text-[10px] text-emerald-500 font-bold tracking-widest uppercase">
+            System: Online
+          </span>
+        </div>
+      </header>
 
-            {/* Corner brackets */}
-            {/* Top Left */}
-            <div className="absolute top-0 left-0 w-10 h-10 border-t border-l border-cyan-400/50" />
-            <div className="absolute top-1 left-1 w-6 h-6 border-t border-l border-gray-400/40" />
+      {/* Main Content */}
+      <main className="relative z-10 flex-1 flex items-center justify-center p-8">
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5 }}
+          className="w-full max-w-md"
+        >
+          {/* Login Card */}
+          <div className="group relative bg-white/5 border border-cyan-400/30 hover:border-cyan-400/50 transition-all duration-500 overflow-hidden">
+            {/* Card Hover Glow */}
+            <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500 bg-cyan-400/5" />
 
-            {/* Top Right */}
-            <div className="absolute top-0 right-0 w-10 h-10 border-t border-r border-cyan-400/50" />
-            <div className="absolute top-1 right-1 w-6 h-6 border-t border-r border-gray-400/40" />
-
-            {/* Bottom Left */}
-            <div className="absolute bottom-0 left-0 w-10 h-10 border-b border-l border-cyan-400/50" />
-            <div className="absolute bottom-1 left-1 w-6 h-6 border-b border-l border-gray-400/40" />
-
-            {/* Bottom Right */}
-            <div className="absolute bottom-0 right-0 w-10 h-10 border-b border-r border-cyan-400/50" />
-            <div className="absolute bottom-1 right-1 w-6 h-6 border-b border-r border-gray-400/40" />
-          </div>
-
-          {/* Content */}
-          <div className="relative z-10">
-            {/* Header */}
-            <div className="text-center mb-8">
-              <Shield className="w-12 h-12 text-cyan-400 mx-auto mb-4" />
-              <h1 className="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-500 tracking-[0.2em] mb-2">
-                IRIS COMMAND
-              </h1>
-              <p className="text-cyan-500/70 text-sm uppercase tracking-[0.2em] font-bold">
-                Secure Access
-              </p>
+            {/* Card Decoration - top right corner slash */}
+            <div className="absolute top-0 right-0 w-12 h-12 overflow-hidden pointer-events-none">
+              <div className="absolute top-0 right-0 w-[140%] h-[2px] bg-cyan-400 transform rotate-45 translate-x-1/2 -translate-y-1/2 opacity-20 group-hover:opacity-100 transition-opacity" />
             </div>
 
-            <form onSubmit={handleSubmit} className="space-y-6">
-              <div>
-                <label className="block text-xs font-bold text-cyan-500/60 uppercase tracking-wider mb-2 flex items-center gap-2">
-                  <span className="w-1 h-4 bg-cyan-400/80 block shrink-0" />
-                  Identifier
-                </label>
-                <input
-                  type="text"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  className="w-full bg-black/50 border border-cyan-500/20 px-4 py-3 text-white focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/50 transition-all"
-                  placeholder="ENTER ID"
-                />
-              </div>
+            {/* Corner Accents */}
+            <div className="absolute top-0 left-0 w-2 h-2 border-t border-l border-white/20" />
+            <div className="absolute top-0 right-0 w-2 h-2 border-t border-r border-white/20" />
+            <div className="absolute bottom-0 left-0 w-2 h-2 border-b border-l border-white/20" />
+            <div className="absolute bottom-0 right-0 w-2 h-2 border-b border-r border-white/20" />
 
-              <div>
-                <label className="block text-xs font-bold text-cyan-500/60 uppercase tracking-wider mb-2 flex items-center gap-2">
-                  <span className="w-1 h-4 bg-cyan-400/80 block shrink-0" />
-                  Passkey
-                </label>
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full bg-black/50 border border-cyan-500/20 px-4 py-3 text-white focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/50 transition-all"
-                  placeholder="••••••••"
-                />
-              </div>
-
-              {error && (
-                <div className="text-red-400 text-xs font-bold text-center bg-red-500/10 py-2 border border-red-500/20">
-                  {error}
+            {/* Content */}
+            <div className="relative z-10 p-8">
+              {/* Header */}
+              <div className="text-center mb-8">
+                <div className="w-16 h-16 rounded-lg bg-black/40 border border-white/10 flex items-center justify-center mx-auto mb-6 group-hover:scale-110 transition-transform duration-500">
+                  <Lock className="w-8 h-8 text-cyan-400" />
                 </div>
-              )}
+                <h2 className="text-2xl font-black text-white tracking-wider uppercase mb-2">
+                  Secure Access
+                </h2>
+                <p className="text-white/40 text-sm uppercase tracking-widest">
+                  Authentication Required
+                </p>
+              </div>
 
-              <button
-                type="submit"
-                disabled={isLoading}
-                className="w-full bg-cyan-600 hover:bg-cyan-500 text-black font-black py-3 uppercase tracking-wider transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {isLoading ? 'Authenticating…' : 'Initialize Session'}
-              </button>
-            </form>
+              <form onSubmit={handleSubmit} className="space-y-6">
+                <div>
+                  <label className="block text-[10px] font-bold text-cyan-500/60 uppercase tracking-widest mb-2 flex items-center gap-2">
+                    <User className="w-3 h-3" />
+                    Identifier
+                  </label>
+                  <input
+                    type="text"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    className="w-full bg-black/50 border border-white/10 hover:border-cyan-500/30 focus:border-cyan-500/50 px-4 py-3 text-white focus:outline-none focus:ring-1 focus:ring-cyan-500/50 transition-all font-mono tracking-wider"
+                    placeholder="ENTER ID"
+                  />
+                </div>
 
-            {/* Footer */}
-            <div className="mt-8 pt-6 border-t border-cyan-500/20 text-center">
-              <p className="text-[10px] text-cyan-500/40">
-                SYSTEM V.4.0.2 // RESTRICTED ACCESS
-              </p>
+                <div>
+                  <label className="block text-[10px] font-bold text-cyan-500/60 uppercase tracking-widest mb-2 flex items-center gap-2">
+                    <Lock className="w-3 h-3" />
+                    Passkey
+                  </label>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="w-full bg-black/50 border border-white/10 hover:border-cyan-500/30 focus:border-cyan-500/50 px-4 py-3 text-white focus:outline-none focus:ring-1 focus:ring-cyan-500/50 transition-all font-mono tracking-wider"
+                    placeholder="••••••••"
+                  />
+                </div>
+
+                {error && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="text-red-400 text-[10px] font-bold text-center bg-red-500/10 py-2 border border-red-500/20 uppercase tracking-widest"
+                  >
+                    {error}
+                  </motion.div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={isLoading}
+                  className="w-full bg-cyan-600 hover:bg-cyan-500 text-black font-black py-3 uppercase tracking-widest transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 group/btn"
+                >
+                  {isLoading ? (
+                    <span>Authenticating...</span>
+                  ) : (
+                    <>
+                      <span>Initialize Session</span>
+                      <ChevronRight className="w-4 h-4 group-hover/btn:translate-x-1 transition-transform" />
+                    </>
+                  )}
+                </button>
+              </form>
+
+              {/* Footer */}
+              <div className="mt-8 pt-6 border-t border-white/5 flex items-center justify-between">
+                <span className="text-[10px] text-white/20 uppercase tracking-widest">
+                  Restricted Access
+                </span>
+                <span className="text-[10px] text-white/20 uppercase tracking-widest">
+                  V.4.0.2
+                </span>
+              </div>
             </div>
+          </div>
+        </motion.div>
+      </main>
+
+      {/* Footer Status */}
+      <footer className="relative z-10 w-full h-12 border-t border-white/5 bg-black/20 flex items-center justify-between px-8 text-[10px] font-mono text-white/20">
+        <div className="flex gap-8">
+          <div className="flex gap-2">
+            <span className="text-white/40">GEO_LOC:</span> BANGALORE_HUB
+          </div>
+          <div className="flex gap-2">
+            <span className="text-white/40">STATUS:</span> AWAITING_AUTH
           </div>
         </div>
-      </motion.div>
+        <div>IRIS COMMAND // SECURE_PORTAL</div>
+      </footer>
     </div>
   );
 };

@@ -38,16 +38,16 @@ overlays:
     heatmap: true
     trails: true
   bcpdrone7:
-    bboxes: true
-    heatmap: true
-    trails: true
+    bboxes: false
+    heatmap: false
+    trails: false
   bcpdrone8:
     bboxes: true
     heatmap: true
-    trails: false
+    trails: true
   bcpdrone9:
-    bboxes: true
-    heatmap: true
+    bboxes: false
+    heatmap: false
     trails: false
 rtsp_links:
 - rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone1

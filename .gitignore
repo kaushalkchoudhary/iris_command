@@ -93,3 +93,16 @@ py_backend/.env.*.local
 py_backend/*.local
 py_backend/.ipynb_checkpoints/
 py_backend/runs/
+crowdanalysis.zip
+/runs/drone_runs/
+/sam 
+py_backend/data/sam_vit_h_4b8939.pth
+py_backend/data/sam_vit_l_0b3195.pth
+py_backend/data/sam_vit_b_01ec64.pth
+py_backend/data/model_final_3d6da3.pkl
+py_backend/data/iris_command_vit_h_4b8939.pth
+py_backend/data/iris_command_vit_l_0b3195.pth
+py_backend/data/iris_command_vit_b_01ec64.pth
+py_backend/data/iris_command_resnet50.pth
+py_backend/data/uploaded_videos/
+crowdanalysis.zipcrowdanalysis.zip

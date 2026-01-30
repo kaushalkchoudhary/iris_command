@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import clsx from 'clsx';
-import { Activity, Globe, Wifi } from 'lucide-react';
+import { Activity, Globe } from 'lucide-react';
 
 const API_BASE_URL = import.meta.env.DEV
   ? '/api'
@@ -41,12 +41,8 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
      METRICS (REAL API)
   ============================ */
   const [fps, setFps] = useState(null);
-  const [latency, setLatency] = useState(null);
-  const [bandwidth, setBandwidth] = useState(null);
 
   useEffect(() => {
-    let timer;
-
     const pollMetrics = async () => {
       try {
         const res = await fetch(`${API_BASE_URL}/metrics`);
@@ -57,36 +53,23 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
 
         let fpsSum = 0;
         let fpsCount = 0;
-        let latencySum = 0;
-        let bwSum = 0;
-        let bwCount = 0;
 
         Object.entries(data).forEach(([id, m]) => {
           if (!ids.includes(id)) return;
-
           if (typeof m.fps === 'number') {
             fpsSum += m.fps;
             fpsCount++;
           }
-          if (typeof m.latency_ms === 'number') {
-            latencySum += m.latency_ms;
-          }
-          if (typeof m.bandwidth_mb === 'number') {
-            bwSum += m.bandwidth_mb;
-            bwCount++;
-          }
         });
 
         setFps(fpsCount ? fpsSum / fpsCount : null);
-        setLatency(fpsCount ? latencySum / fpsCount : null);
-        setBandwidth(bwCount ? bwSum : null);
       } catch (e) {
         console.error('metrics fetch failed', e);
       }
     };
 
     pollMetrics();
-    timer = setInterval(pollMetrics, 2000);
+    const timer = setInterval(pollMetrics, 1500);
     return () => clearInterval(timer);
   }, [selectedVideos]);
 
@@ -152,6 +135,25 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadMessage, setUploadMessage] = useState(null);
+  const [uploadedVideos, setUploadedVideos] = useState([]);
+
+  // Fetch uploaded videos on mount
+  useEffect(() => {
+    const fetchUploads = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/uploads`);
+        if (res.ok) {
+          const data = await res.json();
+          setUploadedVideos(data.uploads || []);
+        }
+      } catch (e) {
+        console.error('Failed to fetch uploads:', e);
+      }
+    };
+    fetchUploads();
+    const interval = setInterval(fetchUploads, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   const uploadFile = async (file) => {
     if (!file) return;
@@ -159,9 +161,11 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
     setUploadProgress(0);
     setUploadMessage(null);
 
+    const formData = new FormData();
+    formData.append('file', file);
+
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${API_BASE_URL}/upload?filename=${encodeURIComponent(file.name)}`);
-    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.open('POST', `${API_BASE_URL}/upload`);
 
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) {
@@ -171,11 +175,35 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
 
     xhr.onload = () => {
       setIsUploading(false);
-      if (xhr.status === 200) {
-        setUploadMessage({ type: 'success', text: 'UPLOADED' });
-        setTimeout(() => setUploadMessage(null), 3000);
+      // Accept any 2xx status code
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          const response = JSON.parse(xhr.responseText);
+          setUploadMessage({ type: 'success', text: 'STARTED' });
+
+          // Add uploaded video to selection
+          const newVideo = {
+            id: response.name,
+            type: 'upload',
+            stream: response.name,
+            label: file.name.replace(/\.[^/.]+$/, '').toUpperCase().slice(0, 8),
+          };
+
+          // Add to uploaded videos list
+          setUploadedVideos(prev => [...prev, { name: response.name, original_name: file.name }]);
+
+          // Auto-select the uploaded video
+          onVideosChange([...selectedVideos, newVideo]);
+
+          setTimeout(() => setUploadMessage(null), 2000);
+        } catch (e) {
+          console.error('Upload parse error:', e, xhr.responseText);
+          setUploadMessage({ type: 'error', text: 'PARSE ERROR' });
+          setTimeout(() => setUploadMessage(null), 3000);
+        }
       } else {
-        setUploadMessage({ type: 'error', text: 'FAILED' });
+        console.error('Upload failed:', xhr.status, xhr.responseText);
+        setUploadMessage({ type: 'error', text: `FAILED (${xhr.status})` });
         setTimeout(() => setUploadMessage(null), 3000);
       }
     };
@@ -186,7 +214,24 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
       setTimeout(() => setUploadMessage(null), 3000);
     };
 
-    xhr.send(file);
+    xhr.send(formData);
+  };
+
+  const toggleUploadedVideo = (upload) => {
+    const video = {
+      id: upload.name,
+      type: 'upload',
+      stream: upload.name,
+      label: (upload.original_name || upload.name).replace(/\.[^/.]+$/, '').toUpperCase().slice(0, 8),
+    };
+
+    const active = selectedVideos.some(v => v.id === upload.name);
+    if (active) {
+      if (selectedVideos.length === 1) return;
+      onVideosChange(selectedVideos.filter(v => v.id !== upload.name));
+    } else {
+      onVideosChange([...selectedVideos, video]);
+    }
   };
 
   /* ============================
@@ -206,21 +251,15 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
         <div className="flex items-center gap-2 border-l border-white/10 pl-6">
           <Globe className="w-3 h-3 text-cyan-500/60" />
           <span className="text-[10px] text-cyan-500/60 uppercase tracking-widest">
-            Nodes: {selectedVideos.length}/{videos.length.toString().padStart(2, '0')}
-          </span>
-        </div>
-
-        <div className="flex items-center gap-2 border-l border-white/10 pl-6">
-          <Activity className="w-3 h-3 text-cyan-500/60" />
-          <span className="text-[10px] text-cyan-500/60 uppercase tracking-widest">
-            Feed: Active
+            Nodes: {selectedVideos.length}/{(videos.length + uploadedVideos.length).toString().padStart(2, '0')}
           </span>
         </div>
       </div>
 
       {/* ===== CENTER: CAMERA SELECTOR & UPLOADER ===== */}
       <div className="flex items-center gap-4">
-        <div className="flex items-center gap-1 border border-white/10 px-1 py-0.5">
+        <div className="flex items-center gap-1 border border-white/10 px-1 py-0.5 max-w-[600px] overflow-x-auto scrollbar-thin scrollbar-track-transparent scrollbar-thumb-cyan-500/30 hover:scrollbar-thumb-cyan-500/50" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(6,182,212,0.3) transparent' }}>
+          {/* Drone sources */}
           {videos.map((vid, idx) => {
             const label =
               vid.label === 'UPLOADED'
@@ -232,7 +271,7 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
                 key={vid.id}
                 onClick={() => toggleVideo(vid)}
                 className={clsx(
-                  'px-3 py-1 text-[10px] uppercase tracking-wider font-bold transition-colors',
+                  'px-3 py-1 text-[10px] uppercase tracking-wider font-bold transition-colors whitespace-nowrap',
                   isSelected(vid.id)
                     ? 'bg-cyan-500 text-black'
                     : 'text-white/40 hover:text-white/70'
@@ -243,13 +282,43 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
               </button>
             );
           })}
+
+          {/* Uploaded videos separator */}
+          {uploadedVideos.length > 0 && (
+            <div className="w-px h-4 bg-white/20 mx-1" />
+          )}
+
+          {/* Uploaded video sources */}
+          {uploadedVideos.map((upload) => {
+            const label = (upload.original_name || upload.name)
+              .replace(/\.[^/.]+$/, '')
+              .toUpperCase()
+              .slice(0, 8);
+            const isActive = selectedVideos.some(v => v.id === upload.name);
+
+            return (
+              <button
+                key={upload.name}
+                onClick={() => toggleUploadedVideo(upload)}
+                className={clsx(
+                  'px-3 py-1 text-[10px] uppercase tracking-wider font-bold transition-colors whitespace-nowrap',
+                  isActive
+                    ? 'bg-emerald-500 text-black'
+                    : 'text-emerald-400/40 hover:text-emerald-400/70'
+                )}
+                title={`Uploaded: ${upload.original_name || upload.name}`}
+              >
+                📹 {label}
+              </button>
+            );
+          })}
         </div>
 
         {/* Tactical Uploader Small UI */}
         <div className="relative group">
           <input
             type="file"
-            accept=".mp4,.mkv,.asf"
+            accept=".mp4,.mkv,.avi,.mov"
             className="absolute inset-0 opacity-0 cursor-pointer z-10"
             onChange={(e) => uploadFile(e.target.files[0])}
             disabled={isUploading}
@@ -286,21 +355,8 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
         </div>
 
         <div className="flex items-center gap-2 border-l border-white/10 pl-6">
-          <span className="text-[10px] text-white/30 uppercase tracking-widest">
-            Latency: {latency !== null ? latency.toFixed(0) : '--'}ms
-          </span>
-        </div>
-
-        <div className="flex items-center gap-2 border-l border-white/10 pl-6">
           <span className="text-[10px] text-cyan-500/80">
             {currentTime}
-          </span>
-        </div>
-
-        <div className="flex items-center gap-2 border-l border-white/10 pl-6">
-          <Wifi className="w-3 h-3 text-white/20" />
-          <span className="text-[10px] text-white/20">
-            {bandwidth !== null ? bandwidth.toFixed(1) : '--'} MB/s
           </span>
         </div>
       </div>

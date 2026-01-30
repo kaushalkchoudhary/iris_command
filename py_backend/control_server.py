@@ -2,17 +2,23 @@ import yaml
 import uuid
 import shutil
 import threading
+import time
 from typing import Dict, List, Optional
 from pathlib import Path
+from collections import deque
 import multiprocessing as mp
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = "admin123"
+# Valid credentials (username -> password)
+VALID_CREDENTIALS = {
+    "admin": "admin123",
+    "commandcentre": "command@2024",
+    "command_admin": "iris_admin#2024",
+}
 
 class LoginRequest(BaseModel):
     username: str
@@ -21,6 +27,15 @@ class LoginRequest(BaseModel):
 RTSP_CONFIG_PATH = Path("data/rtsp_links.yml")
 UPLOAD_DIR = RTSP_CONFIG_PATH.parent / "uploads" / "recordings"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+# Alerts storage
+ALERTS_DIR = RTSP_CONFIG_PATH.parent / "alerts"
+ALERTS_DIR.mkdir(parents=True, exist_ok=True)
+
+alerts_lock = threading.Lock()
+alerts: deque = deque(maxlen=50)  # Keep last 50 alerts
+alert_cooldowns: Dict[str, float] = {}  # Prevent spam: source -> last alert time
+ALERT_COOLDOWN_SECONDS = 30  # Minimum time between alerts from same source
 
 overlay_lock = threading.Lock()
 overlays: Dict[str, Dict[str, bool]] = {}
@@ -65,14 +80,33 @@ def mask_rtsp(url: str) -> str:
 def ensure_overlay(name: str):
     """Ensure overlay state exists for a stream. Default: all overlays ON."""
     with overlay_lock:
-        if name not in overlays:
+        try:
+            # Check if key exists - use direct access for Manager dict compatibility
+            if name in overlays:
+                existing = overlays[name]
+                # Handle DictProxy - check if it has the expected keys
+                has_keys = False
+                try:
+                    has_keys = "trails" in existing and "heatmap" in existing and "bboxes" in existing
+                except:
+                    pass
+                if has_keys:
+                    return  # Already valid
+            # Initialize with defaults - use a plain dict for Manager compatibility
+            default_state = {"heatmap": True, "trails": True, "bboxes": True}
+            overlays[name] = default_state
+            print(f"[OVERLAY] Initialized {name}: {default_state}")
+        except Exception as e:
             overlays[name] = {"heatmap": True, "trails": True, "bboxes": True}
-            print(f"[+] Initialized overlay state for {name}: all ON")
+            print(f"[OVERLAY] Initialized {name} (after error: {e})")
 
 def get_overlay_state(stream: str) -> Dict[str, bool]:
     ensure_overlay(stream)
     with overlay_lock:
-        return overlays[stream].copy()  # Return copy to avoid thread issues
+        try:
+            return dict(overlays[stream])  # Convert to regular dict
+        except:
+            return {"heatmap": True, "trails": True, "bboxes": True}
 
 def update_metrics(stream: str, data: dict):
     with metrics_lock:
@@ -87,6 +121,82 @@ def update_frame(stream: str, jpeg_data: bytes):
 def get_all_metrics():
     with metrics_lock:
         return metrics.copy()
+
+
+def add_alert(source: str, congestion: int, metrics_data: dict, screenshot_data: bytes):
+    """Add a new congestion alert with screenshot."""
+    with alerts_lock:
+        now = time.time()
+
+        # Check cooldown to prevent alert spam
+        last_alert = alert_cooldowns.get(source, 0)
+        if now - last_alert < ALERT_COOLDOWN_SECONDS:
+            return None
+
+        alert_cooldowns[source] = now
+
+        # Generate alert ID and save screenshot
+        alert_id = f"{source}_{int(now * 1000)}"
+        screenshot_path = ALERTS_DIR / f"{alert_id}.jpg"
+
+        try:
+            with open(screenshot_path, "wb") as f:
+                f.write(screenshot_data)
+        except Exception as e:
+            print(f"[ALERT] Failed to save screenshot: {e}")
+            return None
+
+        # Determine severity based on congestion level
+        if congestion >= 60:
+            severity = "critical"
+        elif congestion >= 40:
+            severity = "high"
+        else:
+            severity = "medium"
+
+        alert = {
+            "id": alert_id,
+            "source": source,
+            "severity": severity,
+            "congestion": congestion,
+            "timestamp": now,
+            "time_str": time.strftime("%H:%M:%S"),
+            "screenshot": f"/api/alerts/{alert_id}/screenshot",
+            "metrics": {
+                "congestion_index": metrics_data.get("congestion_index", congestion),
+                "traffic_density": metrics_data.get("traffic_density", 0),
+                "mobility_index": metrics_data.get("mobility_index", 0),
+                "detection_count": metrics_data.get("detection_count", 0),
+                "stalled_pct": metrics_data.get("stalled_pct", 0),
+                "slow_pct": metrics_data.get("slow_pct", 0),
+                "medium_pct": metrics_data.get("medium_pct", 0),
+                "fast_pct": metrics_data.get("fast_pct", 0),
+            }
+        }
+
+        alerts.appendleft(alert)
+        print(f"[ALERT] New {severity} alert for {source}: congestion={congestion}%")
+        return alert
+
+
+def get_alerts(limit: int = 20):
+    """Get recent alerts."""
+    with alerts_lock:
+        return list(alerts)[:limit]
+
+
+def clear_alerts():
+    """Clear all alerts."""
+    with alerts_lock:
+        alerts.clear()
+        alert_cooldowns.clear()
+    # Optionally clean up old screenshots
+    for f in ALERTS_DIR.glob("*.jpg"):
+        try:
+            f.unlink()
+        except:
+            pass
+
 
 app = FastAPI()
 app.add_middleware(
@@ -109,34 +219,54 @@ class ActiveSourcesRequest(BaseModel):
 
 @app.post("/api/login")
 def api_login(req: LoginRequest):
-    return {"success": req.username == ADMIN_USERNAME and req.password == ADMIN_PASSWORD}
+    valid_password = VALID_CREDENTIALS.get(req.username)
+    if valid_password and valid_password == req.password:
+        return {"success": True, "username": req.username}
+    return {"success": False, "error": "Invalid credentials"}
 
 @app.get("/api/overlays")
 def get_overlays():
     with overlay_lock:
-        return overlays
+        # Convert Manager dict to regular dict for JSON serialization
+        try:
+            return {k: dict(v) for k, v in overlays.items()}
+        except:
+            return dict(overlays)
 
 @app.get("/api/overlays/{name}")
 def get_overlay(name: str):
     ensure_overlay(name)
     with overlay_lock:
-        return overlays[name]
+        try:
+            return dict(overlays[name])
+        except:
+            return {"heatmap": True, "trails": True, "bboxes": True}
 
 @app.post("/api/overlays/{name}")
 def set_overlay(name: str, update: OverlayUpdate):
     ensure_overlay(name)
     with overlay_lock:
-        cur = overlays[name]
-        overlays[name] = {
-            "heatmap": update.heatmap if update.heatmap is not None else cur["heatmap"],
-            "trails": update.trails if update.trails is not None else cur["trails"],
-            "bboxes": update.bboxes if update.bboxes is not None else cur["bboxes"],
-        }
+        try:
+            cur = dict(overlays[name])
+        except:
+            cur = {"heatmap": True, "trails": True, "bboxes": True}
 
+        new_state = {
+            "heatmap": update.heatmap if update.heatmap is not None else cur.get("heatmap", True),
+            "trails": update.trails if update.trails is not None else cur.get("trails", True),
+            "bboxes": update.bboxes if update.bboxes is not None else cur.get("bboxes", True),
+        }
+        # Assign as a new dict to ensure Manager dict synchronization
+        overlays[name] = dict(new_state)
+        print(f"[OVERLAY] {name} updated: heatmap={new_state['heatmap']}, trails={new_state['trails']}, bboxes={new_state['bboxes']}")
+
+    # Save to config for persistence
     cfg = load_rtsp_config()
-    cfg.setdefault("overlays", {})[name] = overlays[name]
+    cfg.setdefault("overlays", {})[name] = new_state
     save_rtsp_config(cfg)
-    return overlays[name]
+
+    # Return the actual state from the shared dict to confirm
+    return new_state
 
 
 @app.get("/api/sources")
@@ -197,6 +327,29 @@ def stop_source(req: SourceIndexRequest):
 def get_metrics():
     return get_all_metrics()
 
+
+@app.get("/api/alerts")
+def api_get_alerts(limit: int = 20):
+    """Get recent congestion alerts."""
+    return {"alerts": get_alerts(limit)}
+
+
+@app.get("/api/alerts/{alert_id}/screenshot")
+def api_get_alert_screenshot(alert_id: str):
+    """Get screenshot for a specific alert."""
+    screenshot_path = ALERTS_DIR / f"{alert_id}.jpg"
+    if not screenshot_path.exists():
+        raise HTTPException(404, "Screenshot not found")
+    return FileResponse(screenshot_path, media_type="image/jpeg")
+
+
+@app.delete("/api/alerts")
+def api_clear_alerts():
+    """Clear all alerts."""
+    clear_alerts()
+    return {"status": "cleared"}
+
+
 @app.get("/api/stream/{name}")
 def stream_video(name: str):
     def generate():
@@ -234,13 +387,20 @@ def get_job(job_id: str):
             return jobs[job_id]
     raise HTTPException(404, "Job not found")
 
+# Track uploaded video sources
+upload_sources_lock = threading.Lock()
+upload_sources: Dict[str, dict] = {}  # name -> {process, stop, file_path, job_id}
+
+
 @app.post("/api/upload")
 async def upload_video(file: UploadFile = File(...)):
-    if not file.filename.endswith((".mp4", ".mkv")):
-        raise HTTPException(400)
+    if not file.filename.endswith((".mp4", ".mkv", ".avi", ".mov")):
+        raise HTTPException(400, "Unsupported file format. Use MP4, MKV, AVI, or MOV.")
 
     job_id = uuid.uuid4().hex
-    name = Path(file.filename).stem
+    original_name = Path(file.filename).stem
+    # Create unique name to avoid conflicts
+    name = f"upload_{original_name}_{job_id[:8]}"
     ensure_overlay(name)
 
     target = UPLOAD_DIR / f"{job_id}_{file.filename}"
@@ -248,19 +408,73 @@ async def upload_video(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, f)
 
     stop = mp.Event()
-    start_upload_callback(str(target), stop, name)
+    process = start_upload_callback(str(target), stop, name)
+
+    with upload_sources_lock:
+        upload_sources[name] = {
+            "process": process,
+            "stop": stop,
+            "file_path": str(target),
+            "job_id": job_id,
+            "original_name": original_name,
+        }
 
     with jobs_lock:
         jobs[job_id] = {"id": job_id, "name": name, "status": "processing"}
 
-    return {"job_id": job_id}
+    return {
+        "job_id": job_id,
+        "name": name,
+        "stream_url": f"/api/stream/{name}",
+        "status": "started"
+    }
+
+
+@app.get("/api/uploads")
+def list_uploads():
+    """List all active uploaded video streams."""
+    with upload_sources_lock:
+        return {
+            "uploads": [
+                {
+                    "name": name,
+                    "original_name": info.get("original_name", name),
+                    "job_id": info.get("job_id"),
+                    "stream_url": f"/api/stream/{name}",
+                }
+                for name, info in upload_sources.items()
+            ]
+        }
+
+
+@app.delete("/api/uploads/{name}")
+def stop_upload(name: str):
+    """Stop an uploaded video stream."""
+    with upload_sources_lock:
+        info = upload_sources.pop(name, None)
+        if info:
+            info["stop"].set()
+            # Optionally delete the file
+            try:
+                Path(info["file_path"]).unlink()
+            except:
+                pass
+            return {"status": "stopped", "name": name}
+    raise HTTPException(404, "Upload not found")
 
 def run_control_server(start_source_fn, start_upload_fn, initial_overlays):
     global start_source_callback, start_upload_callback, overlays
 
     start_source_callback = start_source_fn
     start_upload_callback = start_upload_fn
-    overlays = initial_overlays or {}
+
+    # Use the Manager dict if provided, otherwise create a local dict
+    if initial_overlays is not None:
+        overlays = initial_overlays
+        print(f"[OVERLAY] Using shared Manager dict (type: {type(initial_overlays).__name__})")
+    else:
+        overlays = {}
+        print("[OVERLAY] Using local dict (no shared dict provided)")
 
     cfg = load_rtsp_config()
     rtsp_links = cfg.get("rtsp_links", [])
@@ -274,6 +488,7 @@ def run_control_server(start_source_fn, start_upload_fn, initial_overlays):
                 "trails": state.get("trails", True),
                 "bboxes": state.get("bboxes", True),
             }
+            print(f"[OVERLAY] Loaded saved state for {name}: {overlays[name]}")
 
     # Initialize overlays for all configured sources
     for url in rtsp_links:
