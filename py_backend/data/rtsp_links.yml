@@ -1,4 +1,5 @@
-active_sources: []
+active_sources:
+- 5
 overlays:
   bcpdrone1:
     bboxes: false

@@ -5,6 +5,7 @@ import threading
 import time
 import sys
 import base64
+import subprocess
 from typing import Dict, List, Optional
 from pathlib import Path
 from collections import deque
@@ -63,6 +64,11 @@ jobs: Dict[str, dict] = {}
 
 source_lock = threading.Lock()
 running_sources: Dict[int, dict] = {}
+
+# FFmpeg RTSP publishers: name -> subprocess.Popen
+ffmpeg_publishers: Dict[str, subprocess.Popen] = {}
+FFMPEG_PUBLISH_PORT = 9010  # control server port for MJPEG source
+MEDIAMTX_RTSP_PORT = 8554
 
 # Active mode tracking — when mode changes, all sources are stopped first
 active_mode: Optional[str] = None
@@ -284,6 +290,59 @@ def mediamtx_remove_path(name: str):
     ).start()
 
 
+def _start_ffmpeg_publisher(name: str):
+    """Spawn ffmpeg to republish the processed MJPEG stream to mediamtx via RTSP."""
+    _stop_ffmpeg_publisher(name)
+    mjpeg_url = f"http://127.0.0.1:{FFMPEG_PUBLISH_PORT}/api/stream/{name}"
+    rtsp_url = f"rtsp://127.0.0.1:{MEDIAMTX_RTSP_PORT}/processed_{name}"
+    cmd = [
+        "ffmpeg",
+        "-nostdin",
+        "-loglevel", "warning",
+        "-f", "mjpeg",
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
+        "-i", mjpeg_url,
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-tune", "zerolatency",
+        "-g", "30",
+        "-bf", "0",
+        "-pix_fmt", "yuv420p",
+        "-f", "rtsp",
+        "-rtsp_transport", "tcp",
+        rtsp_url,
+    ]
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        ffmpeg_publishers[name] = proc
+        print(f"[FFMPEG] Started publisher for {name} -> processed_{name} (pid={proc.pid})")
+    except Exception as e:
+        print(f"[FFMPEG] Failed to start publisher for {name}: {e}")
+
+
+def _stop_ffmpeg_publisher(name: str):
+    """Stop ffmpeg publisher for a source."""
+    proc = ffmpeg_publishers.pop(name, None)
+    if proc:
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        print(f"[FFMPEG] Stopped publisher for {name}")
+
+
+def _stop_all_ffmpeg_publishers():
+    """Stop all ffmpeg publishers."""
+    for name in list(ffmpeg_publishers.keys()):
+        _stop_ffmpeg_publisher(name)
+
+
 def ensure_overlay(name: str):
     with overlay_lock:
         try:
@@ -454,7 +513,9 @@ def _stop_all_sources():
     cfg["active_sources"] = []
     save_rtsp_config(cfg)
 
-    print(f"[STOP_ALL] Stopped {stopped} sources, cleared SAM workers")
+    _stop_all_ffmpeg_publishers()
+
+    print(f"[STOP_ALL] Stopped {stopped} sources, cleared SAM workers, stopped ffmpeg publishers")
     return stopped
 
 
@@ -577,6 +638,12 @@ def start_source(req: SourceStartRequest):
         overlays[name] = dict(overlay_config)
     print(f"[OVERLAY] {name} set from mode config: {overlay_config}")
 
+    # Start ffmpeg publisher after a short delay to let inference warm up
+    def _delayed_ffmpeg_start(stream_name):
+        time.sleep(3)
+        _start_ffmpeg_publisher(stream_name)
+    threading.Thread(target=_delayed_ffmpeg_start, args=(name,), daemon=True).start()
+
     active = cfg.get("active_sources", [])
     if req.index not in active:
         active.append(req.index)
@@ -586,12 +653,20 @@ def start_source(req: SourceStartRequest):
 
 @app.post("/api/sources/stop")
 def stop_source(req: SourceIndexRequest):
+    # Resolve name for ffmpeg cleanup
+    cfg = load_rtsp_config()
+    name = None
+    if 1 <= req.index <= len(cfg.get("rtsp_links", [])):
+        name = source_display_name(cfg["rtsp_links"][req.index - 1])
+
     with source_lock:
         src = running_sources.pop(req.index, None)
         if src:
             src["stop"].set()
 
-    cfg = load_rtsp_config()
+    if name:
+        _stop_ffmpeg_publisher(name)
+
     cfg["active_sources"] = [i for i in cfg.get("active_sources", []) if i != req.index]
     save_rtsp_config(cfg)
     return {"status": "stopped", "index": req.index}
@@ -709,6 +784,12 @@ async def upload_video(file: UploadFile = File(...)):
     with jobs_lock:
         jobs[job_id] = {"id": job_id, "name": name, "status": "processing"}
 
+    # Start ffmpeg publisher after a short delay to let inference warm up
+    def _delayed_ffmpeg_start(stream_name):
+        time.sleep(3)
+        _start_ffmpeg_publisher(stream_name)
+    threading.Thread(target=_delayed_ffmpeg_start, args=(name,), daemon=True).start()
+
     return {
         "job_id": job_id,
         "name": name,
@@ -735,6 +816,7 @@ def list_uploads():
 
 @app.delete("/api/uploads/{name}")
 def stop_upload(name: str):
+    _stop_ffmpeg_publisher(name)
     with upload_sources_lock:
         info = upload_sources.pop(name, None)
         if info:

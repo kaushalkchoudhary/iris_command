@@ -113,3 +113,4 @@ py_backend/data/uploads
 sam.zip
 jetson@10.0.4.226
 sam/
+py_backend/inference.py.bak2
