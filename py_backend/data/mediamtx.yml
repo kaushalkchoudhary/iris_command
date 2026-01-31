@@ -8,7 +8,13 @@ rtsp: yes
 rtspAddress: :8554
 rtspTransports: [tcp]
 
-hls: no
+hls: yes
+hlsAddress: :8888
+hlsAllowOrigins: ['*']
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
 
 webrtc: yes
 webrtcAddress: :8889
@@ -54,3 +60,6 @@ paths:
   bcpdrone12:
     source: rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone12
     sourceOnDemand: yes
+
+  # Accept any published stream (processed_* from backend inference)
+  all:

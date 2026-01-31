@@ -2,6 +2,8 @@ import os
 import cv2
 import time
 import threading
+import subprocess
+import shutil
 import numpy as np
 import gc
 import multiprocessing as mp
@@ -35,45 +37,52 @@ CONGESTION_ALERT_THRESHOLD = 40  # Trigger alert when congestion >= this value
 def relay_worker(stop_event, f_q, m_q, a_q, rf_q):
     """Relay metrics, frames, raw frames, and alerts from multiprocess queues to control server."""
     while not stop_event.is_set():
+        did_work = False
+
         try:
-            for _ in range(30):
+            for _ in range(60):
                 if f_q.empty():
                     break
                 name, data = f_q.get_nowait()
                 update_frame(name, data)
+                did_work = True
         except:
             pass
 
-        # Relay raw frames for SAM
         try:
             for _ in range(30):
                 if rf_q.empty():
                     break
                 name, data = rf_q.get_nowait()
                 update_raw_frame(name, data)
+                did_work = True
         except:
             pass
 
         try:
-            for _ in range(10):
+            for _ in range(20):
                 if m_q.empty():
                     break
                 name, data = m_q.get_nowait()
                 update_metrics(name, data)
+                did_work = True
         except:
             pass
 
-        # Process alert queue
         try:
             for _ in range(5):
                 if a_q.empty():
                     break
                 source, congestion, metrics_data, screenshot = a_q.get_nowait()
                 add_alert(source, congestion, metrics_data, screenshot)
+                did_work = True
         except:
             pass
 
-        time.sleep(0.002)
+        if not did_work:
+            time.sleep(0.001)
+        else:
+            time.sleep(0.0005)
 
 
 # Optimized RTSP settings - lower buffer for real-time
@@ -86,14 +95,14 @@ MODEL_PATH_CROWD = "data/best_head.pt"
 TARGET_FPS = 30
 
 # Inference settings
-INFERENCE_SIZE = 320  # Smaller inference = less GPU memory + faster
-SKIP_FRAMES = 1  # Process every frame for smooth tracking
-JPEG_QUALITY = 70  # Lower = faster encoding
-MAX_DET = 100  # Max detections per frame
-BBOX_SMOOTH_ALPHA = 0.45  # EMA smoothing for bbox positions (lower = smoother, higher = snappier)
+INFERENCE_SIZE = 320
+SKIP_FRAMES = 1
+JPEG_QUALITY = 70
+MAX_DET = 100
+BBOX_SMOOTH_ALPHA = 0.45
 
-# GPU memory budget: cap each YOLO process so SAM3 has room
-YOLO_GPU_MEMORY_FRACTION = 0.35  # Each YOLO process gets at most 35% of GPU
+# GPU memory budget
+YOLO_GPU_MEMORY_FRACTION = 0.35
 
 # Drones that use crowd counting model
 CROWD_DRONES = {"bcpdrone10", "bcpdrone12"}
@@ -122,10 +131,11 @@ class AnalyticsState:
     __slots__ = (
         "width", "height", "fps", "frame_area", "track_positions",
         "traffic_density_ema", "mobility_index_ema",
-        "fps_frame_count", "fps_last_time", "fps_value"
+        "fps_frame_count", "fps_last_time", "fps_value",
+        "class_names"
     )
 
-    def __init__(self, width: int, height: int, fps: float):
+    def __init__(self, width: int, height: int, fps: float, class_names: dict = None):
         self.width = width
         self.height = height
         self.fps = fps
@@ -136,6 +146,7 @@ class AnalyticsState:
         self.fps_frame_count = 0
         self.fps_last_time = time.time()
         self.fps_value = 0.0
+        self.class_names = class_names or {}
 
     def update(self, tracked_detections) -> dict:
         self.fps_frame_count += 1
@@ -146,20 +157,27 @@ class AnalyticsState:
             self.fps_last_time = time.time()
 
         if tracked_detections is None or tracked_detections.tracker_id is None:
-            return self._build_metrics(0, [0, 0, 0, 0], 0.0)
+            return self._build_metrics(0, [0, 0, 0, 0], 0.0, {})
 
         speed_counts = [0, 0, 0, 0]
         total_area = 0.0
         new_positions = {}
+        class_counts = {}
 
         xyxys = tracked_detections.xyxy
         tids = tracked_detections.tracker_id
+        class_ids = tracked_detections.class_id
 
         for i in range(len(tids)):
             x1, y1, x2, y2 = xyxys[i]
             tid = tids[i]
             cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
             total_area += (x2 - x1) * (y2 - y1)
+
+            if class_ids is not None:
+                cls_id = int(class_ids[i])
+                cls_name = self.class_names.get(cls_id, f"class_{cls_id}")
+                class_counts[cls_name] = class_counts.get(cls_name, 0) + 1
 
             speed_px_s = 0.0
             if tid in self.track_positions:
@@ -172,9 +190,9 @@ class AnalyticsState:
             speed_counts[classify_speed(speed_px_s)] += 1
 
         self.track_positions = new_positions
-        return self._build_metrics(len(tracked_detections), speed_counts, total_area)
+        return self._build_metrics(len(tracked_detections), speed_counts, total_area, class_counts)
 
-    def _build_metrics(self, detection_count: int, speed_counts: list, total_area: float) -> dict:
+    def _build_metrics(self, detection_count: int, speed_counts: list, total_area: float, class_counts: dict = None) -> dict:
         total = max(1, sum(speed_counts))
         stalled_pct = round(speed_counts[0] * 100 // total)
         slow_pct = round(speed_counts[1] * 100 // total)
@@ -210,7 +228,151 @@ class AnalyticsState:
             "medium_pct": medium_pct,
             "fast_pct": fast_pct,
             "detection_count": detection_count,
+            "class_counts": class_counts or {},
         }
+
+
+def _setup_child_logging(name):
+    """Redirect child process stdout/stderr to a log file so we can debug crashes."""
+    import sys
+    log_path = f"/tmp/iris_child_{name}.log"
+    log_file = open(log_path, "w", buffering=1)
+    sys.stdout = log_file
+    sys.stderr = log_file
+    print(f"[CHILD] {name}: logging to {log_path}")
+
+
+class RTSPPublisher:
+    """Publish processed frames to MediaMTX via FFmpeg RTSP push.
+    Uses NVENC if available, falls back to libx264 ultrafast.
+    Encodes with baseline profile for browser/HLS/WebRTC compatibility."""
+
+    def __init__(self, name, width, height, fps=25):
+        self.name = name
+        self.alive = False
+        self.proc = None
+        url = f"rtsp://127.0.0.1:8554/processed_{name}"
+
+        base_input = [
+            "ffmpeg",
+            "-y",
+            "-loglevel", "warning",
+            "-f", "rawvideo",
+            "-vcodec", "rawvideo",
+            "-pix_fmt", "bgr24",
+            "-s", f"{width}x{height}",
+            "-r", str(int(fps)),
+            "-i", "-",
+        ]
+        base_output = ["-f", "rtsp", "-rtsp_transport", "tcp", url]
+
+        # Try NVENC first with a quick probe
+        nvenc_ok = False
+        try:
+            r = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.1",
+                 "-c:v", "h264_nvenc", "-f", "null", "-"],
+                capture_output=True, text=True, timeout=5
+            )
+            nvenc_ok = r.returncode == 0
+        except:
+            pass
+
+        codecs_to_try = []
+        if nvenc_ok:
+            codecs_to_try.append(("h264_nvenc", [
+                "-pix_fmt", "yuv420p",
+                "-c:v", "h264_nvenc",
+                "-preset", "p1",
+                "-tune", "ll",
+                "-profile:v", "baseline",
+                "-level", "3.1",
+                "-rc", "cbr",
+                "-b:v", "2M",
+                "-maxrate", "2M",
+                "-bufsize", "1M",
+                "-g", str(fps),
+                "-bf", "0",
+            ]))
+
+        # Always have libx264 as reliable fallback
+        # -pix_fmt yuv420p required: bgr24 input is 4:4:4, baseline needs 4:2:0
+        codecs_to_try.append(("libx264", [
+            "-pix_fmt", "yuv420p",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-tune", "zerolatency",
+            "-profile:v", "baseline",
+            "-level", "3.1",
+            "-b:v", "2M",
+            "-g", str(fps),
+            "-bf", "0",
+        ]))
+
+        for codec_name, codec_args in codecs_to_try:
+            cmd = base_input + codec_args + base_output
+            print(f"[RTSP-PUB] {name}: trying {codec_name} baseline @ {width}x{height}")
+            try:
+                self.proc = subprocess.Popen(
+                    cmd, stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+                )
+                # Give FFmpeg a moment to fail on init
+                import time as _time
+                _time.sleep(0.5)
+                if self.proc.poll() is not None:
+                    # Process already exited — codec failed
+                    stderr_out = self.proc.stderr.read().decode("utf-8", errors="replace")
+                    print(f"[RTSP-PUB] {name}: {codec_name} failed: {stderr_out.strip()[:200]}")
+                    self.proc = None
+                    continue
+                # Success
+                self.alive = True
+                self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
+                self._stderr_thread.start()
+                print(f"[RTSP-PUB] {name}: publishing to {url} via {codec_name}")
+                break
+            except Exception as e:
+                print(f"[RTSP-PUB] {name}: {codec_name} spawn error: {e}")
+                self.proc = None
+                continue
+
+        if not self.alive:
+            print(f"[RTSP-PUB] {name}: ALL codecs failed, no publisher")
+
+    def _read_stderr(self):
+        """Read FFmpeg stderr in background for debugging."""
+        try:
+            for line in self.proc.stderr:
+                msg = line.decode("utf-8", errors="replace").strip()
+                if msg:
+                    print(f"[RTSP-PUB] {self.name} ffmpeg: {msg}")
+        except:
+            pass
+
+    def write(self, frame):
+        """Write a BGR numpy frame to the FFmpeg stdin."""
+        if not self.alive or self.proc is None:
+            return False
+        try:
+            self.proc.stdin.write(frame.tobytes())
+            return True
+        except (BrokenPipeError, OSError):
+            self.alive = False
+            return False
+
+    def close(self):
+        if self.proc is not None:
+            try:
+                self.proc.stdin.close()
+            except:
+                pass
+            try:
+                self.proc.wait(timeout=3)
+            except:
+                self.proc.kill()
+            self.alive = False
+            print(f"[RTSP-PUB] {self.name}: closed")
 
 
 class FrameCapture:
@@ -218,7 +380,6 @@ class FrameCapture:
 
     def __init__(self, url):
         self.cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-        # Reduce buffer size for lower latency
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.frame = None
         self.ret = False
@@ -231,19 +392,17 @@ class FrameCapture:
             self.thread.start()
 
     def _is_corrupt(self, frame):
-        """Fast corrupt frame detection."""
-        if frame is None:
+        if frame is None or frame.size == 0:
             return True
-        # Check if frame is mostly black or has invalid values
-        if frame.size == 0:
-            return True
-        # Quick check: sample a few pixels
         h, w = frame.shape[:2]
         if h < 10 or w < 10:
             return True
-        # Check for all-zero or all-same frames (corrupt)
-        sample = frame[::h // 4, ::w // 4]
-        if sample.std() < 1.0:  # Nearly uniform = likely corrupt
+        # Fast check: sample 4 pixels at corners — if all identical, likely corrupt
+        tl = frame[2, 2]
+        tr = frame[2, w - 3]
+        bl = frame[h - 3, 2]
+        br = frame[h - 3, w - 3]
+        if np.array_equal(tl, tr) and np.array_equal(bl, br) and np.array_equal(tl, bl):
             return True
         return False
 
@@ -259,7 +418,6 @@ class FrameCapture:
             else:
                 self.consecutive_failures += 1
                 if self.consecutive_failures > 30:
-                    # Try to reconnect
                     time.sleep(0.5)
                 else:
                     time.sleep(0.01)
@@ -285,11 +443,10 @@ class TrailRenderer:
     """Efficient trail rendering with grounded animal-tail style."""
 
     def __init__(self, max_len=20):
-        self.trails = {}  # tid -> list of (x, y)
+        self.trails = {}
         self.max_len = max_len
 
     def update(self, tracked_detections):
-        """Update trails with new detections - attached to bottom of bbox (grounded)."""
         current_ids = set()
 
         if tracked_detections is not None and tracked_detections.tracker_id is not None:
@@ -299,9 +456,8 @@ class TrailRenderer:
             for i in range(len(tids)):
                 x1, y1, x2, y2 = xyxys[i]
                 tid = tids[i]
-                # Attach to BOTTOM-CENTER of bbox (grounded, like animal feet/wheels)
                 gx = int((x1 + x2) * 0.5)
-                gy = int(y2)  # Bottom edge - grounded
+                gy = int(y2)
                 current_ids.add(tid)
 
                 if tid not in self.trails:
@@ -311,7 +467,6 @@ class TrailRenderer:
                 if len(trail) > self.max_len:
                     trail.pop(0)
 
-        # Fade out old trails gradually
         stale = []
         for tid in self.trails:
             if tid not in current_ids:
@@ -326,35 +481,35 @@ class TrailRenderer:
         return current_ids
 
     def render(self, frame, current_ids):
-        """Render thin grounded trails like animal tails dragging behind."""
         for tid, trail in self.trails.items():
             if len(trail) < 2:
                 continue
-
             n = len(trail)
-
-            # Draw thin gradient trail - fades from tail to head
             for i in range(n - 1):
-                # Progress: 0 at oldest (tail tip), 1 at newest (attached to object)
                 progress = (i + 1) / n
-
-                # Color: faint cyan at tail -> bright cyan at head
-                intensity = int(80 + 175 * progress)
-                color = (intensity, int(200 * progress + 55), int(180 * progress + 75))
-
-                # 1px thin like an animal tail
-                cv2.line(frame, trail[i], trail[i + 1], color, 1, cv2.LINE_AA)
+                thickness = max(1, int(1 + 2 * progress))
+                # Purple-to-cyan gradient trail
+                r = int(168 * (1 - progress) + 0 * progress)
+                g = int(85 * (1 - progress) + 255 * progress)
+                b = int(247 * (1 - progress) + 255 * progress)
+                alpha = 0.3 + 0.7 * progress
+                color = (int(b * alpha), int(g * alpha), int(r * alpha))
+                cv2.line(frame, trail[i], trail[i + 1], color, thickness, cv2.LINE_AA)
 
 
 class HeatmapRenderer:
-    """Renders thin grounded heat trails on the road behind vehicles - like tire marks."""
+    """Per-vehicle JET heatmap tail — fat rocket-exhaust style.
+    Blue at the far tail → cyan → green → yellow → red near vehicle.
+    Drawn as continuous fat filled polylines, lightly blurred for glow."""
 
-    def __init__(self, max_len=20):
-        self.heat_trails = {}  # tid -> list of (x, y, radius)
+    def __init__(self, max_len=40):
+        self.trails = {}   # tid -> list of (cx, bot_y, half_w)
         self.max_len = max_len
+        self._jet_lut = cv2.applyColorMap(
+            np.arange(256, dtype=np.uint8).reshape(1, -1), cv2.COLORMAP_JET
+        ).reshape(256, 3)
 
     def update(self, tracked_detections):
-        """Update heat trails - grounded at bottom of bbox (road level)."""
         current_ids = set()
 
         if tracked_detections is not None and tracked_detections.tracker_id is not None:
@@ -365,106 +520,95 @@ class HeatmapRenderer:
                 x1, y1, x2, y2 = xyxys[i]
                 tid = tids[i]
                 current_ids.add(tid)
+                cx = int((x1 + x2) * 0.5)
+                bot_y = int(y2)
+                half_w = max(int((x2 - x1) * 0.6), 6)
 
-                # GROUNDED: bottom-center of bbox (where wheels touch road)
-                gx = int((x1 + x2) * 0.5)
-                gy = int(y2)  # Bottom edge - on the road
-
-                # Thin radius for the heat trail
-                r = int(min(x2 - x1, y2 - y1) * 0.25)
-
-                if tid not in self.heat_trails:
-                    self.heat_trails[tid] = []
-                trail = self.heat_trails[tid]
-                trail.append((gx, gy, r))
+                if tid not in self.trails:
+                    self.trails[tid] = []
+                trail = self.trails[tid]
+                trail.append((cx, bot_y, half_w))
                 if len(trail) > self.max_len:
                     trail.pop(0)
 
-        # Fade out old trails gradually
         stale = []
-        for tid in self.heat_trails:
+        for tid in self.trails:
             if tid not in current_ids:
-                trail = self.heat_trails[tid]
+                trail = self.trails[tid]
                 if trail:
                     trail.pop(0)
                 if not trail:
                     stale.append(tid)
         for tid in stale:
-            del self.heat_trails[tid]
+            del self.trails[tid]
 
         return current_ids
 
     def render(self, frame, current_ids):
-        """Render thin grounded heat trails using COLORMAP_JET."""
         h, w = frame.shape[:2]
+        jet = self._jet_lut
 
-        # Use scaled-down mask for performance
-        scale = 0.5
-        sh, sw = int(h * scale), int(w * scale)
-        heat_mask = np.zeros((sh, sw), dtype=np.uint8)
+        # Draw heat trails on a SEPARATE black canvas (don't touch the frame yet)
+        heat = np.zeros_like(frame)
+        has_heat = False
 
-        for tid, pts in self.heat_trails.items():
-            if tid not in current_ids:
+        for tid, trail in self.trails.items():
+            n = len(trail)
+            if n < 3:
                 continue
-            if len(pts) < 2:
-                continue
+            has_heat = True
 
-            # Use trail points (excluding newest to keep heat behind vehicle)
-            sub_pts = pts[:-1] if len(pts) > 2 else pts
-            n = len(sub_pts)
-            if n < 2:
-                continue
+            # Draw segments as fat filled quads from tail to vehicle
+            for i in range(n - 1):
+                p0 = i / max(n - 1, 1)
+                p1 = (i + 1) / max(n - 1, 1)
 
-            for i in range(n):
-                # Scale coordinates
-                tx = int(sub_pts[i][0] * scale)
-                ty = int(sub_pts[i][1] * scale)
-                tr = int(sub_pts[i][2] * scale)
+                cx0, by0, hw0 = trail[i]
+                cx1, by1, hw1 = trail[i + 1]
 
-                # Phase: 0 at oldest (tail), 1 at newest (near vehicle)
-                phase = (i + 1) / n
+                # Width: VERY fat — 1.5x half-width, min 8px
+                w0 = max(int(hw0 * (0.4 + 0.6 * p0) * 1.5), 8)
+                w1 = max(int(hw1 * (0.4 + 0.6 * p1) * 1.5), 8)
 
-                # Intensity increases towards vehicle (40 to 230)
-                intensity = int(40 + 190 * phase)
+                # JET color
+                p_mid = (p0 + p1) * 0.5
+                jet_idx = min(255, max(0, int(p_mid * 240 + 10)))
+                color = (int(jet[jet_idx][0]), int(jet[jet_idx][1]), int(jet[jet_idx][2]))
 
-                # Thin radius - smaller near tail, slightly larger near vehicle
-                curr_r = max(2, int(tr * (0.5 + 0.5 * phase)))
+                # Filled quad
+                pts = np.array([
+                    [cx0 - w0, by0],
+                    [cx0 + w0, by0],
+                    [cx1 + w1, by1],
+                    [cx1 - w1, by1],
+                ], dtype=np.int32)
+                cv2.fillConvexPoly(heat, pts, color, cv2.LINE_AA)
 
-                # Draw small circle
-                cv2.circle(heat_mask, (tx, ty), curr_r, intensity, -1)
+            # Bright red head at vehicle position
+            cx_head, by_head, hw_head = trail[-1]
+            head_r = max(int(hw_head * 1.2), 8)
+            cv2.circle(heat, (cx_head, by_head), head_r,
+                       (int(jet[250][0]), int(jet[250][1]), int(jet[250][2])), -1, cv2.LINE_AA)
 
-                # Connect with thin lines for smooth trail
-                if i > 0:
-                    px = int(sub_pts[i - 1][0] * scale)
-                    py = int(sub_pts[i - 1][1] * scale)
-                    pr = int(sub_pts[i - 1][2] * scale)
+        if not has_heat:
+            return
 
-                    prev_phase = i / n
-                    prev_intensity = int(40 + 190 * prev_phase)
-                    line_intensity = (intensity + prev_intensity) // 2
+        # Blur ONLY the heat canvas — keeps the video sharp
+        heat = cv2.GaussianBlur(heat, (21, 21), 0)
 
-                    prev_r = max(2, int(pr * (0.5 + 0.5 * prev_phase)))
-                    line_thick = max(1, (curr_r + prev_r) // 2)
+        # Composite: where heat is non-zero, blend it onto the frame
+        # Create mask from heat brightness
+        gray = cv2.cvtColor(heat, cv2.COLOR_BGR2GRAY)
+        _, mask = cv2.threshold(gray, 5, 255, cv2.THRESH_BINARY)
 
-                    cv2.line(heat_mask, (px, py), (tx, ty), line_intensity, line_thick)
+        # Dilate mask slightly for softer edges
+        mask = cv2.GaussianBlur(mask, (11, 11), 0)
 
-        # Apply colormap and blend if there's any heat
-        if np.any(heat_mask > 0):
-            # Gaussian blur for smooth edges (smaller kernel for thinner look)
-            blur = cv2.GaussianBlur(heat_mask, (7, 7), 0)
-
-            # Apply JET colormap (blue -> green -> yellow -> red)
-            colored = cv2.applyColorMap(blur, cv2.COLORMAP_JET)
-
-            # Scale back up to full resolution
-            colored_full = cv2.resize(colored, (w, h), interpolation=cv2.INTER_LINEAR)
-            blur_full = cv2.resize(blur, (w, h), interpolation=cv2.INTER_LINEAR)
-
-            # Create mask where heat exists
-            mask = blur_full > 10
-
-            # Blend with good intensity
-            frame[mask] = cv2.addWeighted(frame[mask], 0.45, colored_full[mask], 0.55, 0)
+        # Alpha blend: heat over frame using mask
+        mask_f = mask.astype(np.float32) / 255.0 * 0.75  # max 75% opacity
+        mask_3 = mask_f[:, :, np.newaxis]
+        blended = frame.astype(np.float32) * (1.0 - mask_3) + heat.astype(np.float32) * mask_3
+        np.copyto(frame, blended.astype(np.uint8))
 
 
 class BboxSmoother:
@@ -472,10 +616,9 @@ class BboxSmoother:
 
     def __init__(self, alpha=BBOX_SMOOTH_ALPHA):
         self.alpha = alpha
-        self.smoothed = {}  # tid -> [x1, y1, x2, y2] as floats
+        self.smoothed = {}
 
     def smooth(self, tracked_detections):
-        """Smooth bbox positions in-place on the detections object. Returns smoothed xyxy copy."""
         if tracked_detections is None or tracked_detections.tracker_id is None:
             self.smoothed.clear()
             return None
@@ -499,7 +642,6 @@ class BboxSmoother:
                 self.smoothed[tid] = raw
                 smoothed_xyxy[i] = raw
 
-        # Remove stale tracks
         stale = [t for t in self.smoothed if t not in active_ids]
         for t in stale:
             del self.smoothed[t]
@@ -507,13 +649,58 @@ class BboxSmoother:
         return smoothed_xyxy
 
 
+def _render_overlays(frame, overlay, tracked, trail_renderer, heatmap_renderer, bbox_smoother, current_ids, CLASS_NAMES):
+    """Render enabled overlays onto the frame. Modifies frame in-place."""
+    if overlay.get("heatmap", False):
+        heatmap_renderer.render(frame, current_ids)
+
+    if overlay.get("trails", False):
+        trail_renderer.render(frame, current_ids)
+
+    if overlay.get("bboxes", False) and tracked is not None and tracked.tracker_id is not None:
+        smoothed_xyxy = bbox_smoother.smooth(tracked)
+        tids = tracked.tracker_id
+        class_ids = tracked.class_id
+
+        for i in range(len(tids)):
+            x1, y1, x2, y2 = map(int, smoothed_xyxy[i])
+            tid = tids[i]
+
+            # Color by class for visual distinction
+            cls_id = int(class_ids[i]) if class_ids is not None else 0
+            colors = {
+                3: (0, 255, 200),   # car - cyan-green
+                4: (0, 200, 255),   # van - sky blue
+                5: (80, 127, 255),  # truck - orange-red
+                7: (255, 180, 0),   # bus - blue
+                8: (200, 0, 255),   # motor - magenta
+                9: (0, 255, 100),   # bicycle - green
+                0: (0, 255, 255),   # head (crowd) - yellow
+            }
+            color = colors.get(cls_id, (0, 255, 255))
+
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
+
+            # Compact label — class name only, small tag
+            cls_name = CLASS_NAMES.get(cls_id, "")
+            if cls_name:
+                label = cls_name.upper()
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.32, 1)
+                ly = y1 - 2 if y1 > 16 else y2 + th + 4
+                lx = x1
+                cv2.rectangle(frame, (lx, ly - th - 2), (lx + tw + 4, ly + 2), color, -1)
+                cv2.putText(frame, label, (lx + 2, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (0, 0, 0), 1, cv2.LINE_AA)
+    else:
+        bbox_smoother.smooth(tracked)
+
+
 def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_dict):
+    """Process RTSP stream: YOLO for metrics + overlays published via RTSP to MediaMTX."""
+    _setup_child_logging(name)
     print(f"[+] Starting optimized inference: {name}")
 
-    # Pre-allocate JPEG encoding params
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
 
-    # ── 1. Connect to RTSP immediately and start pushing raw frames ──
     cap = FrameCapture(url)
     if not cap.isOpened():
         print(f"[!] Failed to open source: {name}")
@@ -523,30 +710,7 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     src_fps = cap.get(cv2.CAP_PROP_FPS) or 25
 
-    # Push raw frames while model loads so the feed shows instantly
-    print(f"[+] {name}: streaming raw frames while model loads...")
-    raw_frame_count = 0
-    while not stop_event.is_set() and raw_frame_count < 200:
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            time.sleep(0.005)
-            continue
-        raw_frame_count += 1
-        # Push every 3rd raw frame to keep the feed alive without flooding
-        if raw_frame_count % 3 == 0:
-            ret_enc, buffer = cv2.imencode(".jpg", frame, encode_params)
-            if ret_enc:
-                try:
-                    if f_q.full():
-                        try: f_q.get_nowait()
-                        except: pass
-                    f_q.put_nowait((name, buffer.tobytes()))
-                except: pass
-        # Break out early once we've pushed a few frames and can start loading model
-        if raw_frame_count >= 6:
-            break
-
-    # ── 2. Load model (frames already visible in frontend) ──
+    # Load model
     device = "cpu"
     half_precision = False
     if torch.cuda.is_available():
@@ -577,185 +741,133 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
         minimum_consecutive_frames=3,
     )
     trail_renderer = TrailRenderer(max_len=20)
-    heatmap_renderer = HeatmapRenderer(max_len=12)
+    heatmap_renderer = HeatmapRenderer(max_len=18)
     bbox_smoother = BboxSmoother(alpha=BBOX_SMOOTH_ALPHA)
-    analytics = AnalyticsState(w, h, src_fps)
+    analytics = AnalyticsState(w, h, src_fps, CLASS_NAMES)
 
-    print(f"[+] {name}: model loaded, switching to processed frames")
+    # Read overlay config once — fixed per mode, not changeable
+    overlay = {"heatmap": False, "trails": False, "bboxes": False}
+    try:
+        if name in overlay_dict:
+            raw = overlay_dict[name]
+            if isinstance(raw, dict):
+                overlay = {
+                    "heatmap": raw.get("heatmap", False),
+                    "trails": raw.get("trails", False),
+                    "bboxes": raw.get("bboxes", False),
+                }
+    except:
+        pass
+
+    has_any_overlay = overlay.get("heatmap") or overlay.get("trails") or overlay.get("bboxes")
+    is_forensics = not has_any_overlay
+    print(f"[+] {name}: model loaded, overlay={overlay}, forensics={is_forensics}")
+
+    # Start RTSP publisher for processed frames (non-forensics modes)
+    publisher = None
+    if not is_forensics:
+        publisher = RTSPPublisher(name, w, h, fps=min(int(src_fps), TARGET_FPS))
 
     last_metrics_time = time.time()
     frame_count = 0
-
-    # For accurate FPS calculation with smoothing
     fps_times = []
     actual_fps = 0.0
 
-    # Cache for overlay state - refresh periodically
-    cached_overlay = {"heatmap": True, "trails": True, "bboxes": True}
-    last_overlay_check = 0
+    print(f"[+] {name}: entering main loop, cap.isOpened={cap.isOpened()}, stop={stop_event.is_set()}")
 
-    # ── 3. Main inference loop ──
-    while cap.isOpened() and not stop_event.is_set():
-        frame_start = time.time()
+    try:
+        while cap.isOpened() and not stop_event.is_set():
+            frame_start = time.time()
 
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            time.sleep(0.005)
-            continue
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                time.sleep(0.005)
+                continue
 
-        frame_count += 1
+            frame_count += 1
 
-        # Skip frames for performance (process every Nth)
-        if SKIP_FRAMES > 1 and frame_count % SKIP_FRAMES != 0:
-            continue
+            if SKIP_FRAMES > 1 and frame_count % SKIP_FRAMES != 0:
+                continue
 
-        # Accurate FPS calculation using rolling window
-        fps_times.append(frame_start)
-        # Keep last 30 frame times for smoothing
-        if len(fps_times) > 30:
-            fps_times.pop(0)
-        if len(fps_times) >= 2:
-            elapsed = fps_times[-1] - fps_times[0]
-            if elapsed > 0:
-                actual_fps = (len(fps_times) - 1) / elapsed
+            fps_times.append(frame_start)
+            if len(fps_times) > 30:
+                fps_times.pop(0)
+            if len(fps_times) >= 2:
+                elapsed = fps_times[-1] - fps_times[0]
+                if elapsed > 0:
+                    actual_fps = (len(fps_times) - 1) / elapsed
 
-        # Get overlay state - refresh every 50ms for real-time toggle response
-        if frame_start - last_overlay_check > 0.05:
-            last_overlay_check = frame_start
-            try:
-                # Read from Manager dict - use direct key access for latest value
-                if name in overlay_dict:
-                    raw = overlay_dict[name]
-                    # Convert to regular dict (handles DictProxy and dict)
-                    if isinstance(raw, dict):
-                        cached_overlay = {
-                            "heatmap": raw.get("heatmap", True),
-                            "trails": raw.get("trails", True),
-                            "bboxes": raw.get("bboxes", True),
-                        }
-                    else:
-                        # Try to extract values from proxy
-                        cached_overlay = {
-                            "heatmap": bool(raw.get("heatmap", True)),
-                            "trails": bool(raw.get("trails", True)),
-                            "bboxes": bool(raw.get("bboxes", True)),
-                        }
-            except Exception as e:
-                pass  # Keep cached value on error
+            # YOLO inference
+            results = model.predict(
+                frame,
+                imgsz=INFERENCE_SIZE,
+                conf=conf_thresh,
+                max_det=MAX_DET,
+                verbose=False,
+                classes=target_classes,
+                half=half_precision and device == "cuda",
+                device=device,
+            )[0]
 
-        overlay = cached_overlay
+            detections = sv.Detections.from_ultralytics(results)
+            tracked = tracker.update_with_detections(detections)
 
-        # Run inference at lower resolution for speed
-        results = model.predict(
-            frame,
-            imgsz=INFERENCE_SIZE,
-            conf=conf_thresh,
-            max_det=MAX_DET,
-            verbose=False,
-            classes=target_classes,
-            half=half_precision and device == "cuda",
-            device=device,
-        )[0]
+            # Update trail/heatmap state
+            current_ids = trail_renderer.update(tracked)
+            heatmap_renderer.update(tracked)
 
-        # Track detections
-        detections = sv.Detections.from_ultralytics(results)
-        tracked = tracker.update_with_detections(detections)
-
-        # Update trails and heatmap
-        current_ids = trail_renderer.update(tracked)
-        heatmap_renderer.update(tracked)
-
-        # Update metrics more frequently for responsive UI
-        now = time.time()
-        if now - last_metrics_time >= 0.2:
-            metrics = analytics.update(tracked)
-            metrics["fps"] = round(actual_fps, 1)
-            try:
-                if not m_q.full():
-                    m_q.put_nowait((name, metrics))
-            except:
-                pass
-            last_metrics_time = now
-
-            # Check for high congestion and trigger alert
-            congestion = metrics.get("congestion_index", 0)
-            if congestion >= CONGESTION_ALERT_THRESHOLD:
+            # Metrics (throttled)
+            now = time.time()
+            if now - last_metrics_time >= 0.25:
+                metrics = analytics.update(tracked)
+                metrics["fps"] = round(actual_fps, 1)
                 try:
-                    # Encode current frame as screenshot for alert
-                    _, screenshot_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                    if not a_q.full():
-                        a_q.put_nowait((name, congestion, metrics, screenshot_buf.tobytes()))
+                    if not m_q.full():
+                        m_q.put_nowait((name, metrics))
                 except:
                     pass
+                last_metrics_time = now
 
-        # Send raw frame (before overlays) for SAM forensics
-        ret_raw, raw_buf = cv2.imencode(".jpg", frame, encode_params)
-        if ret_raw:
-            try:
-                if rf_q.full():
-                    try: rf_q.get_nowait()
-                    except: pass
-                rf_q.put_nowait((name, raw_buf.tobytes()))
-            except: pass
-
-        # Render overlays
-        out = frame
-
-        # Heatmap - localized thermal trails behind vehicles
-        if overlay.get("heatmap", True):
-            heatmap_renderer.render(out, current_ids)
-
-        # Trails - thin animal-tail style
-        if overlay.get("trails", True):
-            trail_renderer.render(out, current_ids)
-
-        # Bounding boxes - smoothed
-        if overlay.get("bboxes", True) and tracked is not None and tracked.tracker_id is not None:
-            smoothed_xyxy = bbox_smoother.smooth(tracked)
-            tids = tracked.tracker_id
-            class_ids = tracked.class_id
-
-            for i in range(len(tids)):
-                x1, y1, x2, y2 = map(int, smoothed_xyxy[i])
-                tid = tids[i]
-
-                # Thin yellow box
-                cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 255), 1)
-
-                # Compact label
-                cls_name = CLASS_NAMES.get(int(class_ids[i]), "") if class_ids is not None else ""
-                label = f"#{tid}"
-                if cls_name:
-                    label += f" {cls_name}"
-
-                # Label position
-                ly = y1 - 4 if y1 > 15 else y2 + 12
-                cv2.putText(out, label, (x1, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
-        else:
-            bbox_smoother.smooth(tracked)  # Keep smoother state updated even if not rendering
-
-        # Encode and send frame
-        ret_enc, buffer = cv2.imencode(".jpg", out, encode_params)
-        if ret_enc:
-            try:
-                # Non-blocking put, drop if full
-                if f_q.full():
+                congestion = metrics.get("congestion_index", 0)
+                if congestion >= CONGESTION_ALERT_THRESHOLD:
                     try:
-                        f_q.get_nowait()
+                        _, screenshot_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                        if not a_q.full():
+                            a_q.put_nowait((name, congestion, metrics, screenshot_buf.tobytes()))
                     except:
                         pass
-                f_q.put_nowait((name, buffer.tobytes()))
-            except:
-                pass
 
-    cap.release()
-    gc.collect()
-    if device == "cuda":
-        torch.cuda.empty_cache()
+            if is_forensics:
+                # Forensics: raw frames for SAM via queue (no publisher)
+                ret_enc, buffer = cv2.imencode(".jpg", frame, encode_params)
+                if ret_enc:
+                    data = buffer.tobytes()
+                    try:
+                        if rf_q.full():
+                            try: rf_q.get_nowait()
+                            except: pass
+                        rf_q.put_nowait((name, data))
+                    except: pass
+            else:
+                # Render overlays and publish via RTSP (H.264 → WebRTC)
+                _render_overlays(frame, overlay, tracked, trail_renderer, heatmap_renderer, bbox_smoother, current_ids, CLASS_NAMES)
+                if publisher and publisher.alive:
+                    publisher.write(frame)
+    finally:
+        if publisher:
+            publisher.close()
+        cap.release()
+        gc.collect()
+        if device == "cuda":
+            torch.cuda.empty_cache()
 
 
-def start_backend(idx, url, name):
-    overlay_shared_dict[name] = get_overlay_state(name)
+def start_backend(idx, url, name, overlay_config=None):
+    """Start inference process for a source with overlay config from mode."""
+    if overlay_config:
+        overlay_shared_dict[name] = overlay_config
+    else:
+        overlay_shared_dict[name] = get_overlay_state(name)
     stop = spawn_ctx.Event()
     p = spawn_ctx.Process(
         target=process_stream,
@@ -766,9 +878,12 @@ def start_backend(idx, url, name):
     return p, stop
 
 
-def start_upload_backend(file_path, name):
-    """Start inference on an uploaded video file."""
-    overlay_shared_dict[name] = get_overlay_state(name)
+def start_upload_backend(file_path, name, overlay_config=None):
+    """Start inference on an uploaded video file with mode-specific overlays."""
+    if overlay_config:
+        overlay_shared_dict[name] = overlay_config
+    else:
+        overlay_shared_dict[name] = get_overlay_state(name)
     stop = spawn_ctx.Event()
     p = spawn_ctx.Process(
         target=process_upload_stream,
@@ -780,12 +895,12 @@ def start_upload_backend(file_path, name):
 
 
 def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, overlay_dict):
-    """Process an uploaded video file with inference - loops the video."""
+    """Process uploaded video: YOLO + overlays published via RTSP to MediaMTX."""
+    _setup_child_logging(f"upload_{name}")
     print(f"[+] Starting upload inference: {name} from {file_path}")
 
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
 
-    # ── 1. Open file and push raw frames instantly ──
     cap = cv2.VideoCapture(file_path)
     if not cap.isOpened():
         print(f"[!] Failed to open uploaded file: {file_path}")
@@ -794,26 +909,8 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     src_fps = cap.get(cv2.CAP_PROP_FPS) or 25
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    # Push raw frames while model loads
-    print(f"[+] {name}: streaming raw frames while model loads...")
-    for _ in range(6):
-        if stop_event.is_set():
-            break
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            break
-        ret_enc, buffer = cv2.imencode(".jpg", frame, encode_params)
-        if ret_enc:
-            try:
-                if f_q.full():
-                    try: f_q.get_nowait()
-                    except: pass
-                f_q.put_nowait((name, buffer.tobytes()))
-            except: pass
-
-    # ── 2. Load model (feed already visible) ──
+    # Load model
     device = "cpu"
     half_precision = False
     if torch.cuda.is_available():
@@ -827,8 +924,6 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
     if device == "cuda":
         model.to(device)
 
-    print(f"[+] {name}: model loaded, switching to processed frames")
-
     target_classes = [3, 4, 5, 7, 8, 9]
     CLASS_NAMES = {3: "car", 4: "van", 5: "truck", 7: "bus", 8: "motor", 9: "bicycle"}
     conf_thresh = 0.15
@@ -841,173 +936,125 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
         minimum_consecutive_frames=3,
     )
     trail_renderer = TrailRenderer(max_len=20)
-    heatmap_renderer = HeatmapRenderer(max_len=12)
+    heatmap_renderer = HeatmapRenderer(max_len=18)
     bbox_smoother = BboxSmoother(alpha=BBOX_SMOOTH_ALPHA)
-    analytics = AnalyticsState(w, h, src_fps)
+    analytics = AnalyticsState(w, h, src_fps, CLASS_NAMES)
+
+    # Read overlay config once — fixed per mode
+    overlay = {"heatmap": False, "trails": False, "bboxes": False}
+    try:
+        if name in overlay_dict:
+            raw = overlay_dict[name]
+            if isinstance(raw, dict):
+                overlay = {
+                    "heatmap": raw.get("heatmap", False),
+                    "trails": raw.get("trails", False),
+                    "bboxes": raw.get("bboxes", False),
+                }
+    except:
+        pass
+
+    has_any_overlay = overlay.get("heatmap") or overlay.get("trails") or overlay.get("bboxes")
+    is_forensics = not has_any_overlay
+    print(f"[+] {name}: model loaded, overlay={overlay}, forensics={is_forensics}")
+
+    # Start RTSP publisher for processed frames
+    publisher = RTSPPublisher(name, w, h, fps=min(int(src_fps), TARGET_FPS))
 
     last_metrics_time = time.time()
-
-    # FPS control - match source FPS
     frame_interval = 1.0 / src_fps
     fps_times = []
     actual_fps = 0.0
 
-    # Cache for overlay state - refresh periodically
-    cached_overlay = {"heatmap": True, "trails": True, "bboxes": True}
-    last_overlay_check = 0
+    try:
+        while not stop_event.is_set():
+            frame_start = time.time()
 
-    while not stop_event.is_set():
-        frame_start = time.time()
+            ret, frame = cap.read()
+            if not ret:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                tracker = sv.ByteTrack(frame_rate=int(src_fps))
+                trail_renderer = TrailRenderer(max_len=20)
+                heatmap_renderer = HeatmapRenderer(max_len=24)
+                continue
 
-        ret, frame = cap.read()
-        if not ret:
-            # Loop the video
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            tracker = sv.ByteTrack(frame_rate=int(src_fps))  # Reset tracker
-            trail_renderer = TrailRenderer(max_len=20)  # Reset trails
-            heatmap_renderer = HeatmapRenderer(max_len=12)  # Reset heatmap
-            continue
+            fps_times.append(frame_start)
+            if len(fps_times) > 30:
+                fps_times.pop(0)
+            if len(fps_times) >= 2:
+                elapsed = fps_times[-1] - fps_times[0]
+                if elapsed > 0:
+                    actual_fps = (len(fps_times) - 1) / elapsed
 
-        # FPS calculation
-        fps_times.append(frame_start)
-        if len(fps_times) > 30:
-            fps_times.pop(0)
-        if len(fps_times) >= 2:
-            elapsed = fps_times[-1] - fps_times[0]
-            if elapsed > 0:
-                actual_fps = (len(fps_times) - 1) / elapsed
+            # YOLO inference
+            results = model.predict(
+                frame,
+                imgsz=INFERENCE_SIZE,
+                conf=conf_thresh,
+                max_det=MAX_DET,
+                verbose=False,
+                classes=target_classes,
+                half=half_precision and device == "cuda",
+                device=device,
+            )[0]
 
-        # Get overlay state - refresh every 50ms for real-time toggle response
-        if frame_start - last_overlay_check > 0.05:
-            last_overlay_check = frame_start
-            try:
-                # Read from Manager dict - use direct key access for latest value
-                if name in overlay_dict:
-                    raw = overlay_dict[name]
-                    # Convert to regular dict (handles DictProxy and dict)
-                    if isinstance(raw, dict):
-                        cached_overlay = {
-                            "heatmap": raw.get("heatmap", True),
-                            "trails": raw.get("trails", True),
-                            "bboxes": raw.get("bboxes", True),
-                        }
-                    else:
-                        # Try to extract values from proxy
-                        cached_overlay = {
-                            "heatmap": bool(raw.get("heatmap", True)),
-                            "trails": bool(raw.get("trails", True)),
-                            "bboxes": bool(raw.get("bboxes", True)),
-                        }
-            except Exception:
-                pass  # Keep cached value on error
+            detections = sv.Detections.from_ultralytics(results)
+            tracked = tracker.update_with_detections(detections)
 
-        overlay = cached_overlay
+            current_ids = trail_renderer.update(tracked)
+            heatmap_renderer.update(tracked)
 
-        # Run inference
-        results = model.predict(
-            frame,
-            imgsz=INFERENCE_SIZE,
-            conf=conf_thresh,
-            max_det=MAX_DET,
-            verbose=False,
-            classes=target_classes,
-            half=half_precision and device == "cuda",
-            device=device,
-        )[0]
-
-        # Track detections
-        detections = sv.Detections.from_ultralytics(results)
-        tracked = tracker.update_with_detections(detections)
-
-        # Update trails and heatmap
-        current_ids = trail_renderer.update(tracked)
-        heatmap_renderer.update(tracked)
-
-        # Update metrics
-        now = time.time()
-        if now - last_metrics_time >= 0.2:
-            metrics = analytics.update(tracked)
-            metrics["fps"] = round(actual_fps, 1)
-            try:
-                if not m_q.full():
-                    m_q.put_nowait((name, metrics))
-            except:
-                pass
-            last_metrics_time = now
-
-            # Check for high congestion alert
-            congestion = metrics.get("congestion_index", 0)
-            if congestion >= CONGESTION_ALERT_THRESHOLD:
+            # Metrics (throttled)
+            now = time.time()
+            if now - last_metrics_time >= 0.25:
+                metrics = analytics.update(tracked)
+                metrics["fps"] = round(actual_fps, 1)
                 try:
-                    _, screenshot_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                    if not a_q.full():
-                        a_q.put_nowait((name, congestion, metrics, screenshot_buf.tobytes()))
+                    if not m_q.full():
+                        m_q.put_nowait((name, metrics))
                 except:
                     pass
+                last_metrics_time = now
 
-        # Send raw frame (before overlays) for SAM forensics
-        ret_raw, raw_buf = cv2.imencode(".jpg", frame, encode_params)
-        if ret_raw:
-            try:
-                if rf_q.full():
-                    try: rf_q.get_nowait()
-                    except: pass
-                rf_q.put_nowait((name, raw_buf.tobytes()))
-            except: pass
-
-        # Render overlays
-        out = frame
-
-        # Heatmap - localized thermal trails behind vehicles
-        if overlay.get("heatmap", True):
-            heatmap_renderer.render(out, current_ids)
-
-        # Trails - thin animal-tail style
-        if overlay.get("trails", True):
-            trail_renderer.render(out, current_ids)
-
-        if overlay.get("bboxes", True) and tracked is not None and tracked.tracker_id is not None:
-            smoothed_xyxy = bbox_smoother.smooth(tracked)
-            tids = tracked.tracker_id
-            class_ids = tracked.class_id
-
-            for i in range(len(tids)):
-                x1, y1, x2, y2 = map(int, smoothed_xyxy[i])
-                tid = tids[i]
-                # Thin yellow box
-                cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 255), 1)
-                cls_name = CLASS_NAMES.get(int(class_ids[i]), "") if class_ids is not None else ""
-                label = f"#{tid}"
-                if cls_name:
-                    label += f" {cls_name}"
-                ly = y1 - 4 if y1 > 15 else y2 + 12
-                cv2.putText(out, label, (x1, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
-        else:
-            bbox_smoother.smooth(tracked)
-
-        # Encode and send frame
-        ret_enc, buffer = cv2.imencode(".jpg", out, encode_params)
-        if ret_enc:
-            try:
-                if f_q.full():
+                congestion = metrics.get("congestion_index", 0)
+                if congestion >= CONGESTION_ALERT_THRESHOLD:
                     try:
-                        f_q.get_nowait()
+                        _, screenshot_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                        if not a_q.full():
+                            a_q.put_nowait((name, congestion, metrics, screenshot_buf.tobytes()))
                     except:
                         pass
-                f_q.put_nowait((name, buffer.tobytes()))
-            except:
-                pass
 
-        # Control frame rate to match source
-        elapsed = time.time() - frame_start
-        if elapsed < frame_interval:
-            time.sleep(frame_interval - elapsed)
+            if is_forensics:
+                # Raw frames for SAM via queue
+                ret_enc, buffer = cv2.imencode(".jpg", frame, encode_params)
+                if ret_enc:
+                    data = buffer.tobytes()
+                    try:
+                        if rf_q.full():
+                            try: rf_q.get_nowait()
+                            except: pass
+                        rf_q.put_nowait((name, data))
+                    except: pass
+                # Also publish raw via RTSP for display
+                if publisher.alive:
+                    publisher.write(frame)
+            else:
+                # Render overlays, publish via RTSP
+                _render_overlays(frame, overlay, tracked, trail_renderer, heatmap_renderer, bbox_smoother, current_ids, CLASS_NAMES)
+                if publisher.alive:
+                    publisher.write(frame)
 
-    cap.release()
-    gc.collect()
-    if device == "cuda":
-        torch.cuda.empty_cache()
-    print(f"[+] Upload inference stopped: {name}")
+            elapsed = time.time() - frame_start
+            if elapsed < frame_interval:
+                time.sleep(frame_interval - elapsed)
+    finally:
+        publisher.close()
+        cap.release()
+        gc.collect()
+        if device == "cuda":
+            torch.cuda.empty_cache()
+        print(f"[+] Upload inference stopped: {name}")
 
 
 def main():
@@ -1017,9 +1064,9 @@ def main():
 
     manager = ctx.Manager()
     overlay_shared_dict = manager.dict()
-    frame_queue = ctx.Queue(maxsize=15)
-    raw_frame_queue = ctx.Queue(maxsize=15)
-    metrics_queue = ctx.Queue(maxsize=10)
+    frame_queue = ctx.Queue(maxsize=60)
+    raw_frame_queue = ctx.Queue(maxsize=30)
+    metrics_queue = ctx.Queue(maxsize=20)
     alert_queue = ctx.Queue(maxsize=10)
 
     stop_relay = threading.Event()

@@ -2,10 +2,10 @@ import React from 'react';
 import { motion } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import {
+    Activity,
     Car,
-    Users,
-    ShieldAlert,
-    Fence,
+    GitBranch,
+    Crosshair,
     ChevronRight,
     Search,
     Power,
@@ -15,48 +15,48 @@ import {
 
 const USE_CASES = [
     {
-        id: 'traffic',
-        title: 'Aerial Traffic Intelligence',
-        description: 'UAV-deployed vehicle tracking, flow analysis, and congestion forecasting via real-time drone vision.',
-        icon: Car,
+        id: 'congestion',
+        title: 'Congestion Analytics',
+        description: 'Real-time heatmap visualization with speed distribution and congestion index monitoring.',
+        icon: Activity,
         color: 'text-cyan-400',
         borderColor: 'border-cyan-400/30',
         bgGlow: 'bg-cyan-400/10',
-        stats: '14 Active Nodes',
+        stats: '12 Active Nodes',
         status: 'Operational'
     },
     {
-        id: 'crowd',
-        title: 'Crowd Analytics',
-        description: 'Density mapping, bottleneck identification, and movement pattern recognition for public spaces.',
-        icon: Users,
-        color: 'text-purple-400',
-        borderColor: 'border-purple-400/30',
-        bgGlow: 'bg-purple-400/10',
-        stats: '08 Active Nodes',
-        status: 'Idle'
-    },
-    {
-        id: 'safety',
-        title: 'Public Safety',
-        description: 'Anomaly detection, unattended object tracking, and automated emergency response triggers.',
-        icon: ShieldAlert,
+        id: 'vehicle',
+        title: 'Vehicle Analytics',
+        description: 'Per-class vehicle counting and classification — cars, trucks, buses, vans, motorcycles, bicycles.',
+        icon: Car,
         color: 'text-emerald-400',
         borderColor: 'border-emerald-400/30',
         bgGlow: 'bg-emerald-400/10',
-        stats: '22 Active Nodes',
+        stats: '12 Active Nodes',
         status: 'Operational'
     },
     {
-        id: 'perimeter',
-        title: 'Perimeter Security',
-        description: 'Multi-spectral intrusion detection and automated target acquisition for high-security zones.',
-        icon: Fence,
-        color: 'text-rose-400',
-        borderColor: 'border-rose-400/30',
-        bgGlow: 'bg-rose-400/10',
-        stats: '05 Active Nodes',
-        status: 'Maintenance'
+        id: 'flow',
+        title: 'Traffic Flow',
+        description: 'Movement trail visualization with slow/fast speed labels and mobility index tracking.',
+        icon: GitBranch,
+        color: 'text-purple-400',
+        borderColor: 'border-purple-400/30',
+        bgGlow: 'bg-purple-400/10',
+        stats: '12 Active Nodes',
+        status: 'Operational'
+    },
+    {
+        id: 'forensics',
+        title: 'IRIS Forensics',
+        description: 'Prompt-based intelligent detection — ask anything about the scene in natural language.',
+        icon: Crosshair,
+        color: 'text-amber-400',
+        borderColor: 'border-amber-400/30',
+        bgGlow: 'bg-amber-400/10',
+        stats: 'Neural Engine',
+        status: 'Operational'
     }
 ];
 

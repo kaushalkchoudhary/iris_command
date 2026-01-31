@@ -1,29 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { AlertTriangle, AlertCircle, XCircle, X, Clock, Activity, Users, Gauge, Search, Square, Play, Loader2, Crosshair, ScanSearch, BarChart3 } from 'lucide-react';
+import { AlertTriangle, AlertCircle, XCircle, X, Clock, Activity, Users, Gauge, Search, Square, Play, Loader2, Crosshair, ScanSearch, BarChart3, Car, Truck, GitBranch } from 'lucide-react';
 import clsx from 'clsx';
 
 const API_BASE_URL = import.meta.env.DEV
   ? '/api'
   : `http://${window.location.hostname}:9010`;
-
-/* ============================
-   DRONE → LOCATION MAP
-============================ */
-const DRONE_REGION_MAP = {
-  bcpdrone1: 'MG Road Junction',
-  bcpdrone2: 'Outer Ring Road',
-  bcpdrone3: 'Whitefield Main Road',
-  bcpdrone4: 'Silk Board Signal',
-  bcpdrone5: 'Marathahalli Bridge',
-  bcpdrone6: 'Electronic City Flyover',
-  bcpdrone7: 'Hebbal Flyover',
-  bcpdrone8: 'KR Puram Junction',
-  bcpdrone9: 'Bellandur Lake Road',
-  bcpdrone10: 'HSR Layout Sector 7',
-  bcpdrone11: 'Yelahanka New Town',
-  bcpdrone12: 'JP Nagar Phase 6',
-};
 
 const severityConfig = {
   critical: {
@@ -59,18 +41,15 @@ const formatTimeAgo = (timestamp) => {
 /* ============================
    IRIS FORENSICS PANEL (TOP)
 ============================ */
-const ForensicsPanel = ({ selectedVideos = [], onExpandResult }) => {
+const ForensicsPanel = ({ selectedVideos = [] }) => {
   const [prompt, setPrompt] = useState('');
   const [source, setSource] = useState('');
   const [confidence, setConfidence] = useState(0.7);
-  const [showBoxes, setShowBoxes] = useState(true);
-  const [showMasks, setShowMasks] = useState(true);
   const [isRunning, setIsRunning] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [samStatus, setSamStatus] = useState(null);
   const pollRef = useRef(null);
-  const updateTimerRef = useRef(null);
 
   useEffect(() => {
     if (selectedVideos.length > 0 && !source) {
@@ -94,7 +73,7 @@ const ForensicsPanel = ({ selectedVideos = [], onExpandResult }) => {
           }
         }
       } catch (e) {
-        console.error('SAM result poll failed:', e);
+        console.error('Result poll failed:', e);
       }
     };
     fetchResult();
@@ -120,37 +99,8 @@ const ForensicsPanel = ({ selectedVideos = [], onExpandResult }) => {
     return () => clearInterval(interval);
   }, [source]);
 
-  const sendUpdate = (updates) => {
-    if (!isRunning || !source) return;
-    if (updateTimerRef.current) clearTimeout(updateTimerRef.current);
-    updateTimerRef.current = setTimeout(async () => {
-      try {
-        await fetch(`${API_BASE_URL}/sam/update`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ source, ...updates }),
-        });
-      } catch (e) {
-        console.error('SAM update failed:', e);
-      }
-    }, 150);
-  };
-
   const handleConfidenceChange = (val) => {
     setConfidence(val);
-    sendUpdate({ confidence: val });
-  };
-
-  const handleToggleBoxes = () => {
-    const next = !showBoxes;
-    setShowBoxes(next);
-    sendUpdate({ show_boxes: next });
-  };
-
-  const handleToggleMasks = () => {
-    const next = !showMasks;
-    setShowMasks(next);
-    sendUpdate({ show_masks: next });
   };
 
   const handleStart = async () => {
@@ -165,8 +115,8 @@ const ForensicsPanel = ({ selectedVideos = [], onExpandResult }) => {
           source,
           prompt: prompt.trim(),
           confidence,
-          show_boxes: showBoxes,
-          show_masks: showMasks,
+          show_boxes: true,
+          show_masks: true,
         }),
       });
       if (res.ok) {
@@ -175,7 +125,7 @@ const ForensicsPanel = ({ selectedVideos = [], onExpandResult }) => {
         setIsLoading(false);
       }
     } catch (e) {
-      console.error('SAM start failed:', e);
+      console.error('Forensics start failed:', e);
       setIsLoading(false);
     }
   };
@@ -188,7 +138,7 @@ const ForensicsPanel = ({ selectedVideos = [], onExpandResult }) => {
         body: JSON.stringify({ source }),
       });
     } catch (e) {
-      console.error('SAM stop failed:', e);
+      console.error('Forensics stop failed:', e);
     }
     setIsRunning(false);
     setIsLoading(false);
@@ -284,33 +234,9 @@ const ForensicsPanel = ({ selectedVideos = [], onExpandResult }) => {
           <span className="text-[11px] text-cyan-400 font-mono font-bold w-8 text-right">{confidence.toFixed(2)}</span>
         </div>
 
-        <div className="flex gap-2 pb-1">
-          <button
-            onClick={handleToggleBoxes}
-            className={clsx(
-              'flex-1 px-3 py-1.5 text-[9px] font-black uppercase tracking-widest border transition-all duration-200',
-              showBoxes
-                ? 'bg-cyan-500 text-black border-cyan-500 shadow-[0_0_10px_rgba(6,182,212,0.4)]'
-                : 'bg-black/60 text-white/40 border-white/10 hover:border-cyan-500/40 hover:text-white/60'
-            )}
-          >
-            BBOX
-          </button>
-          <button
-            onClick={handleToggleMasks}
-            className={clsx(
-              'flex-1 px-3 py-1.5 text-[9px] font-black uppercase tracking-widest border transition-all duration-200',
-              showMasks
-                ? 'bg-cyan-500 text-black border-cyan-500 shadow-[0_0_10px_rgba(6,182,212,0.4)]'
-                : 'bg-black/60 text-white/40 border-white/10 hover:border-cyan-500/40 hover:text-white/60'
-            )}
-          >
-            SEGMENT
-          </button>
-        </div>
       </div>
 
-      {/* Result Area - scrollable, clickable to expand */}
+      {/* Result Area */}
       <div className="flex-1 overflow-y-auto min-h-0 px-4 py-3">
         {isLoading && !result && (
           <div className="flex items-center justify-center h-36 border border-white/5 bg-black/30">
@@ -321,31 +247,8 @@ const ForensicsPanel = ({ selectedVideos = [], onExpandResult }) => {
           </div>
         )}
 
-        {result && result.annotated_frame && (
-          <div
-            className="space-y-2 cursor-pointer group"
-            onClick={() => onExpandResult && onExpandResult({ ...result, source, prompt: result.prompt || prompt })}
-          >
-            {/* Annotated Image */}
-            <div className="relative">
-              <img
-                src={`data:image/jpeg;base64,${result.annotated_frame}`}
-                alt="IRIS Forensics Detection"
-                className="w-full h-auto border border-cyan-500/20 object-contain group-hover:border-cyan-500/40 transition-colors"
-              />
-              <div className="absolute top-1 right-1 flex gap-1">
-                <span className="px-1.5 py-0.5 bg-black/80 border border-cyan-500/30 text-[8px] text-cyan-400 font-mono font-bold">
-                  LIVE
-                </span>
-              </div>
-              <div className="absolute bottom-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                <span className="px-1.5 py-0.5 bg-cyan-500/90 text-[8px] text-black font-mono font-bold">
-                  CLICK TO EXPAND
-                </span>
-              </div>
-            </div>
-
-            {/* Compact Output */}
+        {result && (
+          <div className="space-y-2">
             <div className="bg-black/60 border border-white/10 p-3 font-mono text-[10px] space-y-1.5">
               <div className="flex items-center justify-between border-b border-white/5 pb-1.5 mb-1.5">
                 <span className="text-cyan-500/70 font-black uppercase tracking-wider">Output</span>
@@ -396,55 +299,159 @@ const ForensicsPanel = ({ selectedVideos = [], onExpandResult }) => {
   );
 };
 
-const RightPanel = ({ useCase = 'traffic', selectedVideos = [] }) => {
-  const [alerts, setAlerts] = useState([]);
-  const [selectedAlert, setSelectedAlert] = useState(null);
-  const [expandedForensic, setExpandedForensic] = useState(null);
+/* ============================
+   CONGESTION PANEL (metrics + alerts)
+============================ */
+const CongestionPanel = ({ selectedVideos = [], alerts = [], onSelectAlert }) => {
+  const [metrics, setMetrics] = useState(null);
 
-  // Fetch alerts from backend (including stored)
   useEffect(() => {
-    const fetchAlerts = async () => {
+    const poll = async () => {
       try {
-        const res = await fetch(`${API_BASE_URL}/alerts?limit=50`);
+        const res = await fetch(`${API_BASE_URL}/metrics`);
         if (res.ok) {
           const data = await res.json();
-          setAlerts(data.alerts || []);
+          setMetrics(data);
         }
-      } catch (e) {
-        console.error('Failed to fetch alerts:', e);
-      }
+      } catch (e) {}
     };
-
-    fetchAlerts();
-    const interval = setInterval(fetchAlerts, 3000);
-    return () => clearInterval(interval);
+    poll();
+    const t = setInterval(poll, 2000);
+    return () => clearInterval(t);
   }, []);
 
+  // Aggregate metrics across selected videos
+  const sourceIds = selectedVideos.map(v => v.id);
+  let totalCongestion = 0, totalDensity = 0, totalMobility = 0;
+  let totalStalled = 0, totalSlow = 0, totalMedium = 0, totalFast = 0;
+  let totalDetections = 0;
+  let count = 0;
+
+  if (metrics) {
+    for (const src of sourceIds) {
+      const m = metrics[src];
+      if (!m) continue;
+      count++;
+      totalCongestion += m.congestion_index || 0;
+      totalDensity += m.traffic_density || 0;
+      totalMobility += m.mobility_index || 0;
+      totalStalled += m.stalled_pct || 0;
+      totalSlow += m.slow_pct || 0;
+      totalMedium += m.medium_pct || 0;
+      totalFast += m.fast_pct || 0;
+      totalDetections += m.detection_count || 0;
+    }
+  }
+
+  const avg = (v) => count > 0 ? Math.round(v / count) : 0;
+  const congestion = avg(totalCongestion);
+  const density = avg(totalDensity);
+  const mobility = avg(totalMobility);
+  const stalled = avg(totalStalled);
+  const slow = avg(totalSlow);
+  const medium = avg(totalMedium);
+  const fast = avg(totalFast);
+
+  const congestionColor = congestion >= 60 ? 'text-red-400' : congestion >= 40 ? 'text-orange-400' : congestion >= 20 ? 'text-yellow-400' : 'text-emerald-400';
+  const congestionBorder = congestion >= 60 ? 'border-red-500/20' : congestion >= 40 ? 'border-orange-500/20' : congestion >= 20 ? 'border-yellow-500/20' : 'border-emerald-500/20';
+
+  const speedBands = [
+    { label: 'STALLED', value: stalled, color: 'bg-red-500', text: 'text-red-400' },
+    { label: 'SLOW', value: slow, color: 'bg-orange-500', text: 'text-orange-400' },
+    { label: 'MEDIUM', value: medium, color: 'bg-yellow-500', text: 'text-yellow-400' },
+    { label: 'FAST', value: fast, color: 'bg-emerald-500', text: 'text-emerald-400' },
+  ];
+
   return (
-    <>
-      {/* ================= PANEL ================= */}
-      <motion.div
-        initial={{ x: 40, opacity: 0 }}
-        animate={{ x: 0, opacity: 1 }}
-        className="w-[320px] h-full bg-[#070b14]/80 border-l border-white/10 flex flex-col z-40"
-      >
-        {/* ===== IRIS FORENSICS SECTION (TOP) ===== */}
-        <div className="flex flex-col" style={{ flex: '1.2 1 0%', minHeight: 0 }}>
-          <ForensicsPanel
-            selectedVideos={selectedVideos}
-            onExpandResult={setExpandedForensic}
-          />
+    <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
+      {/* Header */}
+      <div className="px-4 py-3 border-b border-white/10 bg-[#060a12] shrink-0">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Activity className="w-4 h-4 text-cyan-500/70" />
+            <div className="text-xs text-cyan-500 font-black uppercase tracking-[0.25em]">Congestion</div>
+          </div>
+          <span className="text-[10px] font-bold text-cyan-400 bg-cyan-500/15 px-2 py-0.5 border border-cyan-500/20">
+            {count} SOURCE{count !== 1 ? 'S' : ''}
+          </span>
+        </div>
+      </div>
+
+      {/* Scrollable content: metrics + alerts */}
+      <div className="flex-1 overflow-y-auto min-h-0">
+        {/* Metrics section */}
+        <div className="px-4 py-3 space-y-3">
+          {/* Hero congestion index */}
+          <div className={`bg-black/40 border ${congestionBorder} p-4 text-center`}>
+            <div className="text-[10px] text-white/40 uppercase tracking-widest mb-1">Congestion Index</div>
+            <div className={`text-5xl font-black leading-none ${congestionColor}`}>{congestion}%</div>
+            <div className="text-[9px] text-white/20 mt-1 font-mono">{count} source{count !== 1 ? 's' : ''} aggregated</div>
+          </div>
+
+          {/* Key metrics row */}
+          <div className="grid grid-cols-3 gap-2">
+            <div className="bg-black/30 border border-white/5 p-2 text-center">
+              <div className="text-[8px] text-white/30 uppercase tracking-wider">Density</div>
+              <div className="text-lg font-black text-orange-400 leading-tight">{density}%</div>
+            </div>
+            <div className="bg-black/30 border border-white/5 p-2 text-center">
+              <div className="text-[8px] text-white/30 uppercase tracking-wider">Mobility</div>
+              <div className="text-lg font-black text-cyan-400 leading-tight">{mobility}</div>
+            </div>
+            <div className="bg-black/30 border border-white/5 p-2 text-center">
+              <div className="text-[8px] text-white/30 uppercase tracking-wider">Vehicles</div>
+              <div className="text-lg font-black text-white/80 leading-tight">{totalDetections}</div>
+            </div>
+          </div>
+
+          {/* Speed distribution */}
+          <div className="space-y-2">
+            <div className="text-[9px] text-white/40 uppercase tracking-widest font-black">Speed Distribution</div>
+            {speedBands.map(band => (
+              <div key={band.label} className="space-y-0.5">
+                <div className="flex justify-between items-center">
+                  <span className={`text-[10px] font-bold uppercase tracking-wider ${band.text}`}>{band.label}</span>
+                  <span className="text-[10px] font-black text-white/70">{band.value}%</span>
+                </div>
+                <div className="h-1.5 bg-white/5 rounded overflow-hidden">
+                  <motion.div
+                    className={`h-full rounded ${band.color}`}
+                    initial={{ width: 0 }}
+                    animate={{ width: `${band.value}%` }}
+                    transition={{ type: 'spring', stiffness: 60 }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Per-source breakdown */}
+          {sourceIds.length > 1 && metrics && (
+            <div className="space-y-1.5 pt-2 border-t border-white/5">
+              <div className="text-[9px] text-white/40 uppercase tracking-widest font-black">Per Source</div>
+              {sourceIds.map(src => {
+                const m = metrics?.[src];
+                const ci = m?.congestion_index || 0;
+                const droneMatch = src.match(/bcpdrone(\d+)/i);
+                const label = droneMatch ? `DRONE ${droneMatch[1]}` : src;
+                const ciColor = ci >= 60 ? 'text-red-400' : ci >= 40 ? 'text-orange-400' : ci >= 20 ? 'text-yellow-400' : 'text-emerald-400';
+                return (
+                  <div key={src} className="flex justify-between items-center">
+                    <span className="text-[10px] text-white/50 font-mono uppercase">{label}</span>
+                    <span className={`text-[10px] font-bold ${ciColor}`}>{ci}%</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
 
-        {/* ===== ALERTS SECTION (BOTTOM - scrollable) ===== */}
-        <div className="flex flex-col border-t border-white/10" style={{ flex: '1 1 0%', minHeight: 0 }}>
-          {/* Alerts Header */}
-          <div className="px-3 py-2 border-b border-white/5 bg-[#060a12] flex items-center justify-between">
+        {/* Alerts section — contained within scroll */}
+        <div className="border-t border-white/10">
+          <div className="px-4 py-2 bg-[#060a12] flex items-center justify-between">
             <div className="flex items-center gap-2">
               <AlertTriangle className="w-3 h-3 text-red-400/60" />
-              <div className="text-[9px] text-red-400/60 font-black uppercase tracking-[0.3em]">
-                Alerts
-              </div>
+              <div className="text-[9px] text-red-400/60 font-black uppercase tracking-[0.3em]">Alerts</div>
               {alerts.length > 0 && (
                 <span className="px-1.5 py-0.5 bg-red-500/15 text-red-400 text-[9px] font-bold border border-red-500/20">
                   {alerts.length}
@@ -452,59 +459,330 @@ const RightPanel = ({ useCase = 'traffic', selectedVideos = [] }) => {
               )}
             </div>
           </div>
-
-          {/* Alert List - scrollable */}
-          <div className="flex-1 overflow-y-auto min-h-0">
+          <div className="px-2 pb-2">
             {alerts.length === 0 ? (
-              <div className="p-4 text-center">
+              <div className="px-2 py-4 text-center">
                 <div className="text-white/15 text-[10px] font-mono">No active alerts</div>
               </div>
             ) : (
-              alerts.map((alert) => {
-                const config = severityConfig[alert.severity] || severityConfig.medium;
-                const Icon = config.icon;
-                const location = DRONE_REGION_MAP[alert.source] || alert.source;
-                const droneMatch = alert.source.match(/bcpdrone(\d+)/i);
-                const droneLabel = droneMatch ? `D${droneMatch[1]}` : alert.source.toUpperCase();
+              <div className="space-y-1">
+                {alerts.map((alert) => {
+                  const config = severityConfig[alert.severity] || severityConfig.medium;
+                  const Icon = config.icon;
+                  const droneMatch = alert.source.match(/bcpdrone(\d+)/i);
+                  const droneLabel = droneMatch ? `DRONE ${droneMatch[1]}` : alert.source.toUpperCase();
 
-                return (
-                  <div
-                    key={alert.id}
-                    onClick={() => setSelectedAlert(alert)}
-                    className={clsx(
-                      'flex border-b border-white/5 hover:bg-white/[0.03] cursor-pointer transition-colors',
-                      config.bgColor
-                    )}
-                  >
-                    <div className={clsx('w-0.5', config.color.replace('text-', 'bg-'))} />
-
-                    <div className="px-3 py-1.5 flex gap-2 flex-1 font-mono items-center">
+                  return (
+                    <div
+                      key={alert.id}
+                      onClick={() => onSelectAlert(alert)}
+                      className={clsx(
+                        'flex items-center gap-2 px-3 py-2 cursor-pointer transition-colors rounded',
+                        'border border-white/5 hover:border-white/10',
+                        config.bgColor
+                      )}
+                    >
+                      <div className={clsx('w-1 h-8 rounded-full shrink-0', config.color.replace('text-', 'bg-'))} />
                       <Icon className={clsx('w-3.5 h-3.5 shrink-0', config.color)} />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-[10px] font-bold text-white truncate">
-                            {location}
-                          </span>
-                          <span className="text-[8px] font-bold text-cyan-500/60 bg-cyan-500/10 px-1 py-0.5 shrink-0">
-                            {droneLabel}
-                          </span>
+                      <div className="flex-1 min-w-0 font-mono">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-bold text-white truncate">{droneLabel}</span>
+                          <span className={clsx('text-[10px] font-black', config.color)}>{alert.congestion}%</span>
                         </div>
                         <div className="flex items-center gap-2 mt-0.5">
-                          <span className={clsx('text-[8px] uppercase font-bold', config.color)}>
-                            {alert.congestion}%
-                          </span>
-                          <span className="text-[8px] text-white/30">
-                            {formatTimeAgo(alert.timestamp)}
-                          </span>
+                          <span className={clsx('text-[8px] uppercase font-bold', config.color)}>{config.label}</span>
+                          <span className="text-[8px] text-white/30">{formatTimeAgo(alert.timestamp)}</span>
                         </div>
                       </div>
                     </div>
-                  </div>
-                );
-              })
+                  );
+                })}
+              </div>
             )}
           </div>
         </div>
+      </div>
+    </div>
+  );
+};
+
+/* ============================
+   VEHICLE STATS PANEL
+============================ */
+const CLASS_COLORS = {
+  car: { bar: 'bg-cyan-500', text: 'text-cyan-400', shadow: 'shadow-[0_0_8px_rgba(6,182,212,0.4)]' },
+  van: { bar: 'bg-blue-500', text: 'text-blue-400', shadow: 'shadow-[0_0_8px_rgba(59,130,246,0.4)]' },
+  truck: { bar: 'bg-orange-500', text: 'text-orange-400', shadow: 'shadow-[0_0_8px_rgba(249,115,22,0.4)]' },
+  bus: { bar: 'bg-yellow-500', text: 'text-yellow-400', shadow: 'shadow-[0_0_8px_rgba(234,179,8,0.4)]' },
+  motor: { bar: 'bg-purple-500', text: 'text-purple-400', shadow: 'shadow-[0_0_8px_rgba(168,85,247,0.4)]' },
+  bicycle: { bar: 'bg-emerald-500', text: 'text-emerald-400', shadow: 'shadow-[0_0_8px_rgba(16,185,129,0.4)]' },
+};
+
+const VehicleStatsPanel = ({ selectedVideos = [] }) => {
+  const [metrics, setMetrics] = useState(null);
+
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/metrics`);
+        if (res.ok) {
+          const data = await res.json();
+          setMetrics(data);
+        }
+      } catch (e) {}
+    };
+    poll();
+    const t = setInterval(poll, 2000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Aggregate class_counts across selected videos
+  const aggregated = {};
+  let totalVehicles = 0;
+  const sourceIds = selectedVideos.map(v => v.id);
+
+  if (metrics) {
+    for (const src of sourceIds) {
+      const m = metrics[src];
+      if (!m) continue;
+      totalVehicles += m.detection_count || 0;
+      const cc = m.class_counts || {};
+      for (const [cls, count] of Object.entries(cc)) {
+        aggregated[cls] = (aggregated[cls] || 0) + count;
+      }
+    }
+  }
+
+  const sorted = Object.entries(aggregated).sort((a, b) => b[1] - a[1]);
+  const maxCount = sorted.length > 0 ? sorted[0][1] : 1;
+
+  return (
+    <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
+      <div className="px-4 py-3 border-b border-white/10 bg-[#060a12]">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Car className="w-4 h-4 text-emerald-500/70" />
+            <div className="text-xs text-emerald-500 font-black uppercase tracking-[0.25em]">Vehicle Analytics</div>
+          </div>
+          <span className="text-[10px] font-bold text-emerald-400 bg-emerald-500/15 px-2 py-0.5 border border-emerald-500/20">
+            {totalVehicles} TOTAL
+          </span>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto min-h-0 px-4 py-3 space-y-4">
+        {/* Hero count */}
+        <div className="bg-black/40 border border-emerald-500/20 p-4 text-center">
+          <div className="text-[10px] text-white/40 uppercase tracking-widest mb-1">Total Vehicles Detected</div>
+          <div className="text-5xl font-black text-emerald-400 leading-none">{totalVehicles}</div>
+          <div className="text-[9px] text-white/20 mt-1 font-mono">{sourceIds.length} source{sourceIds.length !== 1 ? 's' : ''} active</div>
+        </div>
+
+        {/* Per-class breakdown */}
+        <div className="space-y-2">
+          <div className="text-[9px] text-white/40 uppercase tracking-widest font-black">Classification Breakdown</div>
+          {sorted.length === 0 ? (
+            <div className="text-[10px] text-white/20 font-mono py-4 text-center">No detections yet</div>
+          ) : (
+            sorted.map(([cls, count]) => {
+              const cc = CLASS_COLORS[cls] || { bar: 'bg-white/40', text: 'text-white/60', shadow: '' };
+              const pct = Math.round((count / maxCount) * 100);
+              return (
+                <div key={cls} className="space-y-1">
+                  <div className="flex justify-between items-center">
+                    <span className={`text-[10px] font-bold uppercase tracking-wider ${cc.text}`}>{cls}</span>
+                    <span className="text-[11px] font-black text-white/80">{count}</span>
+                  </div>
+                  <div className="h-1.5 bg-white/5 rounded overflow-hidden">
+                    <motion.div
+                      className={`h-full rounded ${cc.bar} ${cc.shadow}`}
+                      initial={{ width: 0 }}
+                      animate={{ width: `${pct}%` }}
+                      transition={{ type: 'spring', stiffness: 60 }}
+                    />
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        {/* Per-source breakdown */}
+        {sourceIds.length > 1 && (
+          <div className="space-y-2 pt-2 border-t border-white/5">
+            <div className="text-[9px] text-white/40 uppercase tracking-widest font-black">Per Source</div>
+            {sourceIds.map(src => {
+              const m = metrics?.[src];
+              const cnt = m?.detection_count || 0;
+              const droneMatch = src.match(/bcpdrone(\d+)/i);
+              const label = droneMatch ? `DRONE ${droneMatch[1]}` : src;
+              return (
+                <div key={src} className="flex justify-between items-center">
+                  <span className="text-[10px] text-white/50 font-mono uppercase">{label}</span>
+                  <span className="text-[10px] font-bold text-emerald-400">{cnt}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+/* ============================
+   FLOW STATS PANEL
+============================ */
+const FlowStatsPanel = ({ selectedVideos = [] }) => {
+  const [metrics, setMetrics] = useState(null);
+
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/metrics`);
+        if (res.ok) {
+          const data = await res.json();
+          setMetrics(data);
+        }
+      } catch (e) {}
+    };
+    poll();
+    const t = setInterval(poll, 2000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Aggregate across selected videos
+  const sourceIds = selectedVideos.map(v => v.id);
+  let totalMobility = 0;
+  let totalStalled = 0, totalSlow = 0, totalMedium = 0, totalFast = 0;
+  let count = 0;
+
+  if (metrics) {
+    for (const src of sourceIds) {
+      const m = metrics[src];
+      if (!m) continue;
+      count++;
+      totalMobility += m.mobility_index || 0;
+      totalStalled += m.stalled_pct || 0;
+      totalSlow += m.slow_pct || 0;
+      totalMedium += m.medium_pct || 0;
+      totalFast += m.fast_pct || 0;
+    }
+  }
+
+  const avg = (v) => count > 0 ? Math.round(v / count) : 0;
+  const mobility = avg(totalMobility);
+  const stalled = avg(totalStalled);
+  const slow = avg(totalSlow);
+  const medium = avg(totalMedium);
+  const fast = avg(totalFast);
+
+  const speedBands = [
+    { label: 'STALLED', value: stalled, color: 'bg-red-500', text: 'text-red-400' },
+    { label: 'SLOW', value: slow, color: 'bg-orange-500', text: 'text-orange-400' },
+    { label: 'MEDIUM', value: medium, color: 'bg-yellow-500', text: 'text-yellow-400' },
+    { label: 'FAST', value: fast, color: 'bg-emerald-500', text: 'text-emerald-400' },
+  ];
+
+  return (
+    <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
+      <div className="px-4 py-3 border-b border-white/10 bg-[#060a12]">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <GitBranch className="w-4 h-4 text-purple-500/70" />
+            <div className="text-xs text-purple-500 font-black uppercase tracking-[0.25em]">Traffic Flow</div>
+          </div>
+          <span className="text-[10px] font-bold text-purple-400 bg-purple-500/15 px-2 py-0.5 border border-purple-500/20">
+            IDX {mobility}
+          </span>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto min-h-0 px-4 py-3 space-y-4">
+        {/* Hero mobility */}
+        <div className="bg-black/40 border border-purple-500/20 p-4 text-center">
+          <div className="text-[10px] text-white/40 uppercase tracking-widest mb-1">Mobility Index</div>
+          <div className="text-5xl font-black text-purple-400 leading-none">{mobility}</div>
+          <div className="text-[9px] text-white/20 mt-1 font-mono">{count} source{count !== 1 ? 's' : ''} aggregated</div>
+        </div>
+
+        {/* Speed distribution */}
+        <div className="space-y-3">
+          <div className="text-[9px] text-white/40 uppercase tracking-widest font-black">Speed Distribution</div>
+          {speedBands.map(band => (
+            <div key={band.label} className="space-y-1">
+              <div className="flex justify-between items-center">
+                <span className={`text-[10px] font-bold uppercase tracking-wider ${band.text}`}>{band.label}</span>
+                <span className="text-[11px] font-black text-white/80">{band.value}%</span>
+              </div>
+              <div className="h-2 bg-white/5 rounded overflow-hidden">
+                <motion.div
+                  className={`h-full rounded ${band.color}`}
+                  initial={{ width: 0 }}
+                  animate={{ width: `${band.value}%` }}
+                  transition={{ type: 'spring', stiffness: 60 }}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const RightPanel = ({ useCase = 'congestion', selectedVideos = [] }) => {
+  const [alerts, setAlerts] = useState([]);
+  const [selectedAlert, setSelectedAlert] = useState(null);
+  // Track session start time — only show alerts newer than this
+  const [sessionStart] = useState(() => Date.now() / 1000);
+
+  // Only poll alerts when in congestion mode
+  useEffect(() => {
+    if (useCase !== 'congestion') {
+      setAlerts([]);
+      return;
+    }
+    const fetchAlerts = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/alerts?limit=50`);
+        if (res.ok) {
+          const data = await res.json();
+          // Only show alerts from this session (newer than sessionStart)
+          const fresh = (data.alerts || []).filter(a => a.timestamp >= sessionStart);
+          setAlerts(fresh);
+        }
+      } catch (e) {
+        console.error('Failed to fetch alerts:', e);
+      }
+    };
+    fetchAlerts();
+    const interval = setInterval(fetchAlerts, 3000);
+    return () => clearInterval(interval);
+  }, [useCase, sessionStart]);
+
+  return (
+    <>
+      <motion.div
+        initial={{ x: 40, opacity: 0 }}
+        animate={{ x: 0, opacity: 1 }}
+        className="w-[320px] h-full bg-[#070b14]/80 border-l border-white/10 flex flex-col z-40"
+      >
+        {useCase === 'congestion' && (
+          <CongestionPanel selectedVideos={selectedVideos} alerts={alerts} onSelectAlert={setSelectedAlert} />
+        )}
+
+        {useCase === 'vehicle' && (
+          <VehicleStatsPanel selectedVideos={selectedVideos} />
+        )}
+
+        {useCase === 'flow' && (
+          <FlowStatsPanel selectedVideos={selectedVideos} />
+        )}
+
+        {useCase === 'forensics' && (
+          <ForensicsPanel selectedVideos={selectedVideos} />
+        )}
       </motion.div>
 
       {/* ================= ALERT DETAIL MODAL ================= */}
@@ -543,9 +821,6 @@ const RightPanel = ({ useCase = 'traffic', selectedVideos = [] }) => {
                         <div>
                           <div className="flex items-center gap-2">
                             <span className="text-lg font-black text-white uppercase tracking-wide">
-                              {DRONE_REGION_MAP[selectedAlert.source] || selectedAlert.source}
-                            </span>
-                            <span className="text-xs font-bold text-cyan-400 bg-cyan-500/20 px-2 py-0.5">
                               {droneLabel}
                             </span>
                           </div>
@@ -641,178 +916,6 @@ const RightPanel = ({ useCase = 'traffic', selectedVideos = [] }) => {
                             <span className="text-emerald-400">Fast</span>
                             <span className="text-white/70">{selectedAlert.metrics?.fast_pct || 0}%</span>
                           </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* ================= FORENSICS DETAIL MODAL ================= */}
-      <AnimatePresence>
-        {expandedForensic && (
-          <motion.div
-            className="fixed inset-0 bg-black/90 z-[100] flex items-center justify-center p-6"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            onClick={() => setExpandedForensic(null)}
-          >
-            <motion.div
-              onClick={(e) => e.stopPropagation()}
-              className="bg-[#0a1120] max-w-5xl w-full border border-cyan-500/20 relative overflow-hidden"
-              initial={{ scale: 0.96 }}
-              animate={{ scale: 1 }}
-            >
-              <button
-                onClick={() => setExpandedForensic(null)}
-                className="absolute top-4 right-4 z-10 border border-white/10 p-2 bg-black/50 hover:bg-white/10 transition-colors"
-              >
-                <X className="w-4 h-4 text-white/70" />
-              </button>
-
-              {/* Header */}
-              <div className="p-4 border-b border-cyan-500/20 bg-black/30">
-                <div className="flex items-center gap-3">
-                  <Crosshair className="w-6 h-6 text-cyan-500" />
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-lg font-black text-white uppercase tracking-wide">
-                        IRIS Forensics
-                      </span>
-                      <span className="text-xs font-bold text-cyan-400 bg-cyan-500/20 px-2 py-0.5">
-                        {expandedForensic.source?.toUpperCase()}
-                      </span>
-                      <span className="text-xs font-bold text-emerald-400 bg-emerald-500/15 px-2 py-0.5 border border-emerald-500/20">
-                        {expandedForensic.count} DETECTED
-                      </span>
-                    </div>
-                    <div className="text-sm font-bold text-cyan-400/70">
-                      Prompt: "{expandedForensic.prompt}" &bull; Confidence: {((expandedForensic.confidence || 0.7) * 100).toFixed(0)}%
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Image + Metrics side by side */}
-              <div className="flex flex-col md:flex-row">
-                {/* Image — uses object-cover to fill its box, no black bars */}
-                <div className="flex-1 relative bg-[#050810] min-h-0 flex items-center justify-center overflow-hidden">
-                  <img
-                    src={`data:image/jpeg;base64,${expandedForensic.annotated_frame}`}
-                    alt="Forensic Detection"
-                    className="w-full h-full object-cover"
-                    style={{ maxHeight: '60vh' }}
-                  />
-                  <div className="absolute top-2 left-2 px-2 py-1 bg-black/70 border border-cyan-500/30 text-xs text-cyan-400 font-mono font-bold">
-                    LIVE ANALYSIS
-                  </div>
-                  <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 text-xs text-white/60 font-mono">
-                    {new Date(expandedForensic.timestamp * 1000).toLocaleTimeString()}
-                  </div>
-                </div>
-
-                {/* Metrics Panel — scrollable right side */}
-                <div className="w-full md:w-80 bg-black/20 border-t md:border-t-0 md:border-l border-cyan-500/10 overflow-y-auto" style={{ maxHeight: '60vh' }}>
-                  {/* Stats cards */}
-                  <div className="p-4 space-y-3">
-                    <div className="flex items-center gap-2 mb-1">
-                      <BarChart3 className="w-4 h-4 text-cyan-500/60" />
-                      <div className="text-xs text-cyan-500/60 font-black uppercase tracking-widest">
-                        Detection Analytics
-                      </div>
-                    </div>
-
-                    {/* 2x2 stat grid */}
-                    <div className="grid grid-cols-2 gap-2">
-                      <div className="bg-black/40 border border-white/5 p-3 rounded">
-                        <div className="flex items-center gap-1.5 mb-1.5">
-                          <ScanSearch className="w-3.5 h-3.5 text-cyan-400" />
-                          <span className="text-[9px] text-white/40 uppercase tracking-wide">Prompt</span>
-                        </div>
-                        <div className="text-sm font-bold text-cyan-400 break-words leading-tight">
-                          "{expandedForensic.prompt}"
-                        </div>
-                      </div>
-
-                      <div className="bg-black/40 border border-white/5 p-3 rounded">
-                        <div className="flex items-center gap-1.5 mb-1.5">
-                          <Crosshair className="w-3.5 h-3.5 text-emerald-400" />
-                          <span className="text-[9px] text-white/40 uppercase tracking-wide">Found</span>
-                        </div>
-                        <div className="text-3xl font-black text-emerald-400 leading-none">
-                          {expandedForensic.count}
-                        </div>
-                      </div>
-
-                      <div className="bg-black/40 border border-white/5 p-3 rounded">
-                        <div className="flex items-center gap-1.5 mb-1.5">
-                          <Gauge className="w-3.5 h-3.5 text-yellow-400" />
-                          <span className="text-[9px] text-white/40 uppercase tracking-wide">Confidence</span>
-                        </div>
-                        <div className="text-3xl font-black text-yellow-400 leading-none">
-                          {((expandedForensic.confidence || 0.7) * 100).toFixed(0)}%
-                        </div>
-                      </div>
-
-                      <div className="bg-black/40 border border-white/5 p-3 rounded">
-                        <div className="flex items-center gap-1.5 mb-1.5">
-                          <Activity className="w-3.5 h-3.5 text-white/50" />
-                          <span className="text-[9px] text-white/40 uppercase tracking-wide">Source</span>
-                        </div>
-                        <div className="text-sm font-bold text-white/80 leading-tight">
-                          {DRONE_REGION_MAP[expandedForensic.source] || expandedForensic.source}
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Render config */}
-                    <div className="flex gap-2 pt-1">
-                      <span className={clsx(
-                        'px-3 py-1.5 text-[9px] font-bold uppercase border rounded',
-                        expandedForensic.show_boxes ? 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30' : 'bg-white/5 text-white/20 border-white/10'
-                      )}>
-                        BBOX {expandedForensic.show_boxes ? 'ON' : 'OFF'}
-                      </span>
-                      <span className={clsx(
-                        'px-3 py-1.5 text-[9px] font-bold uppercase border rounded',
-                        expandedForensic.show_masks ? 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30' : 'bg-white/5 text-white/20 border-white/10'
-                      )}>
-                        MASK {expandedForensic.show_masks ? 'ON' : 'OFF'}
-                      </span>
-                    </div>
-
-                    {/* Detection scores */}
-                    {expandedForensic.detections && expandedForensic.detections.length > 0 && (
-                      <div className="pt-3 border-t border-white/10">
-                        <div className="text-[10px] text-white/40 uppercase mb-3 tracking-wide">Detection Scores</div>
-                        <div className="space-y-3">
-                          {expandedForensic.detections.map((det, i) => (
-                            <div key={i}>
-                              <div className="flex justify-between text-xs mb-1.5">
-                                <span className="text-white/50 font-mono">Object #{i + 1}</span>
-                                <span className="text-cyan-400 font-bold text-sm">{(det.score * 100).toFixed(1)}%</span>
-                              </div>
-                              <div className="h-2.5 bg-white/5 rounded overflow-hidden">
-                                <div
-                                  className="h-full rounded transition-all duration-500"
-                                  style={{
-                                    width: `${det.score * 100}%`,
-                                    background: det.score > 0.8 ? '#10b981' : det.score > 0.5 ? '#06b6d4' : '#eab308',
-                                  }}
-                                />
-                              </div>
-                              {det.box && (
-                                <div className="text-[9px] text-white/20 font-mono mt-1">
-                                  bbox: [{det.box.join(', ')}]
-                                </div>
-                              )}
-                            </div>
-                          ))}
                         </div>
                       </div>
                     )}

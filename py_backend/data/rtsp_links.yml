@@ -1,39 +1,37 @@
-active_sources:
-- 8
-- 9
+active_sources: []
 overlays:
   bcpdrone1:
     bboxes: false
     heatmap: true
     trails: false
   bcpdrone10:
-    bboxes: true
-    heatmap: false
+    bboxes: false
+    heatmap: true
     trails: false
   bcpdrone11:
     bboxes: true
     heatmap: true
     trails: true
   bcpdrone12:
-    bboxes: true
+    bboxes: false
     heatmap: true
-    trails: true
+    trails: false
   bcpdrone2:
     bboxes: false
     heatmap: false
     trails: false
   bcpdrone3:
-    bboxes: true
+    bboxes: false
     heatmap: true
-    trails: true
+    trails: false
   bcpdrone4:
     bboxes: true
-    heatmap: true
+    heatmap: false
     trails: true
   bcpdrone5:
-    bboxes: true
+    bboxes: false
     heatmap: true
-    trails: true
+    trails: false
   bcpdrone6:
     bboxes: true
     heatmap: true
@@ -43,11 +41,11 @@ overlays:
     heatmap: false
     trails: false
   bcpdrone8:
-    bboxes: false
-    heatmap: true
-    trails: false
+    bboxes: true
+    heatmap: false
+    trails: true
   bcpdrone9:
-    bboxes: false
+    bboxes: true
     heatmap: true
     trails: false
 rtsp_links:

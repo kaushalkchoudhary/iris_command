@@ -64,6 +64,17 @@ jobs: Dict[str, dict] = {}
 source_lock = threading.Lock()
 running_sources: Dict[int, dict] = {}
 
+# Active mode tracking — when mode changes, all sources are stopped first
+active_mode: Optional[str] = None
+
+# Fixed overlay config per mode — hardcoded, not user-changeable
+MODE_OVERLAYS = {
+    "congestion": {"heatmap": True, "trails": False, "bboxes": False},
+    "vehicle":    {"heatmap": False, "trails": False, "bboxes": True},
+    "flow":       {"heatmap": False, "trails": True,  "bboxes": True},
+    "forensics":  {"heatmap": False, "trails": False, "bboxes": False},
+}
+
 start_source_callback = None
 start_upload_callback = None
 
@@ -87,7 +98,6 @@ def _load_sam_model():
 
     try:
         import torch
-        # Add sam dir to path so sam3 package is importable
         sam_str = str(SAM_DIR)
         if sam_str not in sys.path:
             sys.path.insert(0, sam_str)
@@ -97,7 +107,6 @@ def _load_sam_model():
 
         checkpoint = SAM_DIR / "sam3.pt"
 
-        # Clear any leftover CUDA cache before loading
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -121,17 +130,14 @@ def _sam_annotate_frame(jpeg_data: bytes, prompt: str, confidence: float = 0.7,
     """Run SAM3 inference on a JPEG frame and return annotated image + detections."""
     import torch
 
-    # Decode JPEG to numpy (BGR)
     img_array = cv2.imdecode(np.frombuffer(jpeg_data, np.uint8), cv2.IMREAD_COLOR)
     if img_array is None:
         return None, []
 
-    # Convert BGR → RGB, to tensor, to CUDA
     rgb = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
     tensor = torch.from_numpy(rgb).permute(2, 0, 1).to("cuda")
 
     with sam_lock:
-        # Set confidence threshold on the processor so it filters at model level
         sam_processor.confidence_threshold = confidence
         with torch.amp.autocast("cuda", dtype=torch.float16):
             state = sam_processor.set_image(tensor)
@@ -151,16 +157,13 @@ def _sam_annotate_frame(jpeg_data: bytes, prompt: str, confidence: float = 0.7,
                 m = m.squeeze()
             bi = b.astype(int)
 
-            # Draw mask overlay (yellow, 35% opacity)
             if show_masks:
                 yellow_overlay = img_array.copy()
-                yellow_overlay[m > 0.5] = [0, 255, 255]  # BGR yellow
+                yellow_overlay[m > 0.5] = [0, 255, 255]
                 img_array = cv2.addWeighted(img_array, 0.65, yellow_overlay, 0.35, 0)
 
-            # Draw bounding box
             if show_boxes:
                 cv2.rectangle(img_array, (bi[0], bi[1]), (bi[2], bi[3]), (0, 255, 255), 2)
-                # Label with score
                 label = f"{s:.0%}"
                 cv2.putText(img_array, label, (bi[0], bi[1] - 6),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
@@ -170,19 +173,16 @@ def _sam_annotate_frame(jpeg_data: bytes, prompt: str, confidence: float = 0.7,
                 "box": [int(bi[0]), int(bi[1]), int(bi[2]), int(bi[3])],
             })
 
-    # Encode annotated image back to JPEG
     _, jpeg_out = cv2.imencode(".jpg", img_array, [cv2.IMWRITE_JPEG_QUALITY, 85])
     return jpeg_out.tobytes(), detections
 
 
 def _sam_worker(source: str, prompt: str, confidence: float, stop_event: threading.Event,
                 show_boxes: bool = True, show_masks: bool = True, settings_ref: dict = None):
-    """Background thread: grab frame every 2s, run SAM3, store result.
-    settings_ref is a mutable dict that can be updated live from the API."""
+    """Background thread: grab frame every 2s, run SAM3, store result."""
     print(f"[SAM3] Worker started for {source} with prompt='{prompt}' conf={confidence}")
     while not stop_event.is_set():
         try:
-            # Read live settings if available
             cur_confidence = confidence
             cur_show_boxes = show_boxes
             cur_show_masks = show_masks
@@ -191,7 +191,6 @@ def _sam_worker(source: str, prompt: str, confidence: float, stop_event: threadi
                 cur_show_boxes = settings_ref.get("show_boxes", show_boxes)
                 cur_show_masks = settings_ref.get("show_masks", show_masks)
 
-            # Grab latest RAW frame (before YOLO overlays)
             with raw_frame_lock:
                 jpeg_data = raw_frame_buffer.get(source)
 
@@ -218,9 +217,8 @@ def _sam_worker(source: str, prompt: str, confidence: float, stop_event: threadi
         except Exception as e:
             print(f"[SAM3] Worker error for {source}: {e}")
 
-        stop_event.wait(2.0)  # Run every 2 seconds
+        stop_event.wait(2.0)
 
-    # Cleanup on stop
     with sam_results_lock:
         sam_results.pop(source, None)
     print(f"[SAM3] Worker stopped for {source}")
@@ -247,9 +245,7 @@ def mask_rtsp(url: str) -> str:
     return url
 
 def _mediamtx_add_path_sync(name: str, rtsp_url: str):
-    """Add an RTSP source path to MediaMTX (blocking)."""
     try:
-        # Delete first if it exists (fast cleanup)
         http_requests.delete(
             f"{MEDIAMTX_API}/v3/config/paths/delete/{name}", timeout=2,
         )
@@ -267,7 +263,6 @@ def _mediamtx_add_path_sync(name: str, rtsp_url: str):
 
 
 def _mediamtx_remove_path_sync(name: str):
-    """Delete an RTSP source path from MediaMTX (blocking)."""
     try:
         r = http_requests.delete(
             f"{MEDIAMTX_API}/v3/config/paths/delete/{name}", timeout=2,
@@ -278,35 +273,29 @@ def _mediamtx_remove_path_sync(name: str):
 
 
 def mediamtx_add_path(name: str, rtsp_url: str):
-    """Add an RTSP source path to MediaMTX (non-blocking)."""
     threading.Thread(
         target=_mediamtx_add_path_sync, args=(name, rtsp_url), daemon=True
     ).start()
 
 
 def mediamtx_remove_path(name: str):
-    """Remove an RTSP source path from MediaMTX (non-blocking)."""
     threading.Thread(
         target=_mediamtx_remove_path_sync, args=(name,), daemon=True
     ).start()
 
 
 def ensure_overlay(name: str):
-    """Ensure overlay state exists for a stream. Default: all overlays ON."""
     with overlay_lock:
         try:
-            # Check if key exists - use direct access for Manager dict compatibility
             if name in overlays:
                 existing = overlays[name]
-                # Handle DictProxy - check if it has the expected keys
                 has_keys = False
                 try:
                     has_keys = "trails" in existing and "heatmap" in existing and "bboxes" in existing
                 except:
                     pass
                 if has_keys:
-                    return  # Already valid
-            # Initialize with defaults - use a plain dict for Manager compatibility
+                    return
             default_state = {"heatmap": True, "trails": True, "bboxes": True}
             overlays[name] = default_state
             print(f"[OVERLAY] Initialized {name}: {default_state}")
@@ -318,7 +307,7 @@ def get_overlay_state(stream: str) -> Dict[str, bool]:
     ensure_overlay(stream)
     with overlay_lock:
         try:
-            return dict(overlays[stream])  # Convert to regular dict
+            return dict(overlays[stream])
         except:
             return {"heatmap": True, "trails": True, "bboxes": True}
 
@@ -346,14 +335,12 @@ def add_alert(source: str, congestion: int, metrics_data: dict, screenshot_data:
     with alerts_lock:
         now = time.time()
 
-        # Check cooldown to prevent alert spam
         last_alert = alert_cooldowns.get(source, 0)
         if now - last_alert < ALERT_COOLDOWN_SECONDS:
             return None
 
         alert_cooldowns[source] = now
 
-        # Generate alert ID and save screenshot
         alert_id = f"{source}_{int(now * 1000)}"
         screenshot_path = ALERTS_DIR / f"{alert_id}.jpg"
 
@@ -364,7 +351,6 @@ def add_alert(source: str, congestion: int, metrics_data: dict, screenshot_data:
             print(f"[ALERT] Failed to save screenshot: {e}")
             return None
 
-        # Determine severity based on congestion level
         if congestion >= 60:
             severity = "critical"
         elif congestion >= 40:
@@ -398,11 +384,10 @@ def add_alert(source: str, congestion: int, metrics_data: dict, screenshot_data:
 
 
 def load_stored_alerts():
-    """Load previously saved alerts from disk (screenshot filenames encode source+timestamp)."""
+    """Load previously saved alerts from disk."""
     loaded = 0
     for jpg in sorted(ALERTS_DIR.glob("*.jpg"), key=lambda f: f.stat().st_mtime, reverse=True):
-        # filename format: {source}_{timestamp_ms}.jpg
-        stem = jpg.stem  # e.g. "bcpdrone8_1738281600000"
+        stem = jpg.stem
         parts = stem.rsplit("_", 1)
         if len(parts) != 2:
             continue
@@ -432,22 +417,45 @@ def load_stored_alerts():
 
 
 def get_alerts(limit: int = 20):
-    """Get recent alerts."""
     with alerts_lock:
         return list(alerts)[:limit]
 
 
 def clear_alerts():
-    """Clear all alerts."""
     with alerts_lock:
         alerts.clear()
         alert_cooldowns.clear()
-    # Optionally clean up old screenshots
     for f in ALERTS_DIR.glob("*.jpg"):
         try:
             f.unlink()
         except:
             pass
+
+
+def _stop_all_sources():
+    """Stop every running source and SAM worker."""
+    global active_mode
+    stopped = 0
+
+    with source_lock:
+        for idx, src in list(running_sources.items()):
+            src["stop"].set()
+            stopped += 1
+        running_sources.clear()
+
+    for src_name, info in list(sam_threads.items()):
+        info["stop_event"].set()
+    sam_threads.clear()
+
+    with sam_results_lock:
+        sam_results.clear()
+
+    cfg = load_rtsp_config()
+    cfg["active_sources"] = []
+    save_rtsp_config(cfg)
+
+    print(f"[STOP_ALL] Stopped {stopped} sources, cleared SAM workers")
+    return stopped
 
 
 app = FastAPI()
@@ -466,6 +474,10 @@ class OverlayUpdate(BaseModel):
 class SourceIndexRequest(BaseModel):
     index: int
 
+class SourceStartRequest(BaseModel):
+    index: int
+    mode: Optional[str] = None
+
 class ActiveSourcesRequest(BaseModel):
     indexes: List[int]
 
@@ -479,7 +491,6 @@ def api_login(req: LoginRequest):
 @app.get("/api/overlays")
 def get_overlays():
     with overlay_lock:
-        # Convert Manager dict to regular dict for JSON serialization
         try:
             return {k: dict(v) for k, v in overlays.items()}
         except:
@@ -508,16 +519,13 @@ def set_overlay(name: str, update: OverlayUpdate):
             "trails": update.trails if update.trails is not None else cur.get("trails", True),
             "bboxes": update.bboxes if update.bboxes is not None else cur.get("bboxes", True),
         }
-        # Assign as a new dict to ensure Manager dict synchronization
         overlays[name] = dict(new_state)
         print(f"[OVERLAY] {name} updated: heatmap={new_state['heatmap']}, trails={new_state['trails']}, bboxes={new_state['bboxes']}")
 
-    # Save to config for persistence
     cfg = load_rtsp_config()
     cfg.setdefault("overlays", {})[name] = new_state
     save_rtsp_config(cfg)
 
-    # Return the actual state from the shared dict to confirm
     return new_state
 
 
@@ -541,10 +549,17 @@ def list_sources():
     return {"sources": out, "active_sources": sorted(active)}
 
 @app.post("/api/sources/start")
-def start_source(req: SourceIndexRequest):
+def start_source(req: SourceStartRequest):
+    global active_mode
+
     cfg = load_rtsp_config()
     if req.index < 1 or req.index > len(cfg["rtsp_links"]):
         raise HTTPException(400)
+
+    if req.mode and req.mode != active_mode:
+        print(f"[MODE] Switching from {active_mode} -> {req.mode}, stopping all sources")
+        _stop_all_sources()
+        active_mode = req.mode
 
     with source_lock:
         if req.index in running_sources:
@@ -552,18 +567,22 @@ def start_source(req: SourceIndexRequest):
 
         url = cfg["rtsp_links"][req.index - 1]
         name = source_display_name(url)
-        ensure_overlay(name)
 
-        process, stop = start_source_callback(req.index, url, name)
+        overlay_config = MODE_OVERLAYS.get(active_mode, {"heatmap": False, "trails": False, "bboxes": False})
+
+        process, stop = start_source_callback(req.index, url, name, overlay_config)
         running_sources[req.index] = {"process": process, "stop": stop}
 
-    # Append to active_sources (don't replace)
+    with overlay_lock:
+        overlays[name] = dict(overlay_config)
+    print(f"[OVERLAY] {name} set from mode config: {overlay_config}")
+
     active = cfg.get("active_sources", [])
     if req.index not in active:
         active.append(req.index)
     cfg["active_sources"] = active
     save_rtsp_config(cfg)
-    return {"status": "started", "index": req.index}
+    return {"status": "started", "index": req.index, "mode": active_mode}
 
 @app.post("/api/sources/stop")
 def stop_source(req: SourceIndexRequest):
@@ -577,6 +596,14 @@ def stop_source(req: SourceIndexRequest):
     save_rtsp_config(cfg)
     return {"status": "stopped", "index": req.index}
 
+@app.post("/api/sources/stop_all")
+def stop_all_sources():
+    """Stop every running source and SAM worker."""
+    global active_mode
+    count = _stop_all_sources()
+    active_mode = None
+    return {"status": "stopped", "count": count}
+
 @app.get("/api/metrics")
 def get_metrics():
     return get_all_metrics()
@@ -584,13 +611,11 @@ def get_metrics():
 
 @app.get("/api/alerts")
 def api_get_alerts(limit: int = 20):
-    """Get recent congestion alerts."""
     return {"alerts": get_alerts(limit)}
 
 
 @app.get("/api/alerts/{alert_id}/screenshot")
 def api_get_alert_screenshot(alert_id: str):
-    """Get screenshot for a specific alert."""
     screenshot_path = ALERTS_DIR / f"{alert_id}.jpg"
     if not screenshot_path.exists():
         raise HTTPException(404, "Screenshot not found")
@@ -599,7 +624,6 @@ def api_get_alert_screenshot(alert_id: str):
 
 @app.delete("/api/alerts")
 def api_clear_alerts():
-    """Clear all alerts."""
     clear_alerts()
     return {"status": "cleared"}
 
@@ -610,24 +634,30 @@ def stream_video(name: str):
         last_seq = -1
         while True:
             with frame_lock:
-                # Wait for a new frame if the current sequence matches what we last sent
                 while frame_sequences.get(name, 0) <= last_seq:
-                    # Timeout every 1s to allow checking for connection closure
-                    if not frame_lock.wait(timeout=1.0):
+                    if not frame_lock.wait(timeout=0.3):
                         break
-                
+
                 frame = frame_buffer.get(name)
                 last_seq = frame_sequences.get(name, 0)
-            
+
             if frame:
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
             else:
-                # Fallback to prevent infinite loop on empty buffer
                 import time
-                time.sleep(0.1)
+                time.sleep(0.033)
 
-    return StreamingResponse(generate(), media_type="multipart/x-mixed-replace; boundary=frame")
+    return StreamingResponse(
+        generate(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 @app.get("/api/jobs")
 def list_jobs():
@@ -641,9 +671,8 @@ def get_job(job_id: str):
             return jobs[job_id]
     raise HTTPException(404, "Job not found")
 
-# Track uploaded video sources
 upload_sources_lock = threading.Lock()
-upload_sources: Dict[str, dict] = {}  # name -> {process, stop, file_path, job_id}
+upload_sources: Dict[str, dict] = {}
 
 
 @app.post("/api/upload")
@@ -653,7 +682,6 @@ async def upload_video(file: UploadFile = File(...)):
 
     job_id = uuid.uuid4().hex
     original_name = Path(file.filename).stem
-    # Create unique name to avoid conflicts
     name = f"upload_{original_name}_{job_id[:8]}"
     ensure_overlay(name)
 
@@ -661,7 +689,13 @@ async def upload_video(file: UploadFile = File(...)):
     with open(target, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    process, stop = start_upload_callback(str(target), name)
+    overlay_config = MODE_OVERLAYS.get(active_mode, {"heatmap": False, "trails": False, "bboxes": False})
+
+    with overlay_lock:
+        overlays[name] = dict(overlay_config)
+    print(f"[UPLOAD] {name} overlays from active_mode={active_mode}: {overlay_config}")
+
+    process, stop = start_upload_callback(str(target), name, overlay_config)
 
     with upload_sources_lock:
         upload_sources[name] = {
@@ -685,7 +719,6 @@ async def upload_video(file: UploadFile = File(...)):
 
 @app.get("/api/uploads")
 def list_uploads():
-    """List all active uploaded video streams."""
     with upload_sources_lock:
         return {
             "uploads": [
@@ -702,12 +735,10 @@ def list_uploads():
 
 @app.delete("/api/uploads/{name}")
 def stop_upload(name: str):
-    """Stop an uploaded video stream."""
     with upload_sources_lock:
         info = upload_sources.pop(name, None)
         if info:
             info["stop"].set()
-            # Optionally delete the file
             try:
                 Path(info["file_path"]).unlink()
             except:
@@ -736,17 +767,14 @@ class SamUpdateRequest(BaseModel):
 
 @app.post("/api/sam/start")
 def sam_start(req: SamStartRequest):
-    """Start SAM3 inference loop for a source."""
     if not _load_sam_model():
         raise HTTPException(503, "SAM3 model failed to load")
 
-    # Stop existing worker for this source if any
     existing = sam_threads.get(req.source)
     if existing:
         existing["stop_event"].set()
         existing["thread"].join(timeout=5)
 
-    # Mutable settings dict that the worker reads each iteration
     settings_ref = {
         "confidence": req.confidence,
         "show_boxes": req.show_boxes,
@@ -775,7 +803,6 @@ def sam_start(req: SamStartRequest):
 
 @app.post("/api/sam/update")
 def sam_update(req: SamUpdateRequest):
-    """Update SAM3 settings live without restarting the worker."""
     info = sam_threads.get(req.source)
     if not info:
         raise HTTPException(404, "SAM not running for this source")
@@ -805,7 +832,6 @@ def sam_update(req: SamUpdateRequest):
 
 @app.get("/api/sam/result/{source}")
 def sam_result(source: str):
-    """Get latest SAM3 result for a source."""
     with sam_results_lock:
         result = sam_results.get(source)
     if result is None:
@@ -815,7 +841,6 @@ def sam_result(source: str):
 
 @app.post("/api/sam/stop")
 def sam_stop(req: SamStopRequest):
-    """Stop SAM3 inference for a source."""
     info = sam_threads.pop(req.source, None)
     if info:
         info["stop_event"].set()
@@ -825,7 +850,6 @@ def sam_stop(req: SamStopRequest):
 
 @app.get("/api/sam/status")
 def sam_status():
-    """Get SAM3 status."""
     active = list(sam_threads.keys())
     return {
         "model_loaded": sam_model_loaded,
@@ -848,7 +872,6 @@ def run_control_server(start_source_fn, start_upload_fn, initial_overlays):
     start_source_callback = start_source_fn
     start_upload_callback = start_upload_fn
 
-    # Use the Manager dict if provided, otherwise create a local dict
     if initial_overlays is not None:
         overlays = initial_overlays
         print(f"[OVERLAY] Using shared Manager dict (type: {type(initial_overlays).__name__})")
@@ -859,7 +882,6 @@ def run_control_server(start_source_fn, start_upload_fn, initial_overlays):
     cfg = load_rtsp_config()
     rtsp_links = cfg.get("rtsp_links", [])
 
-    # Load saved overlay states from config
     saved_overlays = cfg.get("overlays", {})
     for name, state in saved_overlays.items():
         with overlay_lock:
@@ -870,12 +892,10 @@ def run_control_server(start_source_fn, start_upload_fn, initial_overlays):
             }
             print(f"[OVERLAY] Loaded saved state for {name}: {overlays[name]}")
 
-    # Initialize overlays for all configured sources
     for url in rtsp_links:
         ensure_overlay(source_display_name(url))
 
-    # Load stored alerts from disk
-    load_stored_alerts()
+    # Skip loading stored alerts — only show new alerts from this session
 
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=9010)
