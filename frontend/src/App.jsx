@@ -273,23 +273,25 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
   const [isCellLoading, setIsCellLoading] = useState(true);
   const [samResult, setSamResult] = useState(null);
 
-  // Phase 1: instant raw RTSP via WebRTC (always connects)
-  const { videoRef: rawVideoRef, connected: rawConnected } = useWebRTC(video.id);
+  const isUpload = video.type === 'upload';
+
+  // Phase 1: instant raw RTSP via WebRTC (skip for uploads — no raw source exists)
+  const { videoRef: rawVideoRef, connected: rawConnected } = useWebRTC(video.id, !isUpload);
 
   // Phase 2: processed feed via WebRTC (libx264 baseline → RTSP → MediaMTX → WebRTC)
   const processedStreamName = `processed_${video.id}`;
   const isForensics = useCase === 'forensics';
   const { videoRef: processedVideoRef, connected: processedConnected } = useWebRTC(
     processedStreamName,
-    !isForensics  // Only connect for non-forensics modes
+    isUpload || !isForensics  // Uploads always use processed; non-forensics drones too
   );
 
-  // Hide loader once raw WebRTC connects
+  // Hide loader once the appropriate stream connects
   useEffect(() => {
-    if (rawConnected) setIsCellLoading(false);
+    if (isUpload ? processedConnected : rawConnected) setIsCellLoading(false);
     const fallback = setTimeout(() => setIsCellLoading(false), 3000);
     return () => clearTimeout(fallback);
-  }, [rawConnected]);
+  }, [rawConnected, processedConnected, isUpload]);
 
   // Poll forensics result when in forensics mode
   useEffect(() => {
@@ -319,8 +321,8 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
     WebkitMaskComposite: 'source-in'
   };
 
-  const showProcessed = processedConnected && !isForensics;
-  const showForensicsResult = isForensics && samResult;
+  const showForensicsResult = isForensics && !!samResult;
+  const showProcessed = processedConnected && (isUpload || !isForensics) && !showForensicsResult;
 
   return (
     <div className={`relative overflow-hidden group ${getVideoClass(index, total)}`}>
@@ -338,22 +340,24 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
       <div className="absolute bottom-4 left-4 w-2 h-2 border-b border-l border-white/20 z-20 pointer-events-none" />
       <div className="absolute bottom-4 right-4 w-2 h-2 border-b border-r border-white/20 z-20 pointer-events-none" />
 
-      {/* Layer 1: WebRTC raw RTSP — instant, always underneath */}
-      <video
-        ref={rawVideoRef}
-        autoPlay
-        playsInline
-        muted
-        className="absolute inset-0 w-full h-full object-cover"
-        style={{
-          ...maskStyle,
-          opacity: (showProcessed || showForensicsResult) ? 0 : 1,
-          transition: 'opacity 0.5s ease',
-        }}
-      />
+      {/* Layer 1: WebRTC raw RTSP — instant, always underneath (hidden for uploads) */}
+      {!isUpload && (
+        <video
+          ref={rawVideoRef}
+          autoPlay
+          playsInline
+          muted
+          className="absolute inset-0 w-full h-full object-cover"
+          style={{
+            ...maskStyle,
+            opacity: (showProcessed || showForensicsResult) ? 0 : 1,
+            transition: 'opacity 0.5s ease',
+          }}
+        />
+      )}
 
-      {/* Layer 2: WebRTC processed stream — fades in once connected */}
-      {!isForensics && (
+      {/* Layer 2: WebRTC processed stream — fades in once connected (primary layer for uploads) */}
+      {(isUpload || !isForensics) && (
         <video
           ref={processedVideoRef}
           autoPlay
@@ -379,7 +383,7 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
       )}
 
       {/* Awaiting analysis prompt overlay */}
-      {isForensics && !samResult && rawConnected && (
+      {isForensics && !samResult && (isUpload ? processedConnected : rawConnected) && (
         <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
           <div className="px-4 py-2 bg-black/70 border border-amber-500/30 backdrop-blur-sm">
             <span className="text-[10px] font-black uppercase tracking-[0.3em] text-amber-400/80">
@@ -451,7 +455,7 @@ const Dashboard = ({ onLogout }) => {
 
     const startStreams = async () => {
       for (const v of selectedVideos) {
-        if (cancelled) return;
+        if (cancelled || v.type === 'upload') continue;  // uploads already processing via /api/upload
         await startDroneProcessing(v.droneIndex, useCase);
       }
     };
