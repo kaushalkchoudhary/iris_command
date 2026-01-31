@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import clsx from 'clsx';
-import { Activity, Globe } from 'lucide-react';
+import { Activity, Globe, Upload } from 'lucide-react';
 
 const API_BASE_URL = import.meta.env.DEV
   ? '/api'
@@ -22,122 +22,79 @@ const DRONE_REGION_MAP = {
 };
 
 const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
-  /* ============================
-     CLOCK
-  ============================ */
-  const [currentTime, setCurrentTime] = useState(
-    new Date().toLocaleTimeString()
-  );
-
-  useEffect(() => {
-    const t = setInterval(
-      () => setCurrentTime(new Date().toLocaleTimeString()),
-      1000
-    );
-    return () => clearInterval(t);
-  }, []);
-
-  /* ============================
-     METRICS (REAL API)
-  ============================ */
+  /* ── METRICS ── */
   const [fps, setFps] = useState(null);
 
   useEffect(() => {
-    const pollMetrics = async () => {
+    const poll = async () => {
       try {
         const res = await fetch(`${API_BASE_URL}/metrics`);
         if (!res.ok) return;
-
         const data = await res.json();
         const ids = selectedVideos.map(v => v.id);
-
-        let fpsSum = 0;
-        let fpsCount = 0;
-
+        let sum = 0, cnt = 0;
         Object.entries(data).forEach(([id, m]) => {
           if (!ids.includes(id)) return;
-          if (typeof m.fps === 'number') {
-            fpsSum += m.fps;
-            fpsCount++;
-          }
+          if (typeof m.fps === 'number') { sum += m.fps; cnt++; }
         });
-
-        setFps(fpsCount ? fpsSum / fpsCount : null);
-      } catch (e) {
-        console.error('metrics fetch failed', e);
-      }
+        setFps(cnt ? sum / cnt : null);
+      } catch (e) { /* silent */ }
     };
-
-    pollMetrics();
-    const timer = setInterval(pollMetrics, 1500);
-    return () => clearInterval(timer);
+    poll();
+    const t = setInterval(poll, 1500);
+    return () => clearInterval(t);
   }, [selectedVideos]);
 
-  /* ============================
-     AUTO REFRESH SOURCES
-  ============================ */
+  /* ── AUTO REFRESH ── */
   useEffect(() => {
     if (!onRefresh) return;
     const i = setInterval(onRefresh, 5000);
     return () => clearInterval(i);
   }, [onRefresh]);
 
-  /* ============================
-     CAMERA LABELS (OLD LOGIC)
-  ============================ */
+  /* ── UPLOADED MAP ── */
   const uploadedMap = useMemo(() => {
     const map = {};
     let c = 0;
     videos.forEach(v => {
-      if (v.label === 'UPLOADED') {
-        c++;
-        map[v.id] = `UP ${c}`;
-      }
+      if (v.label === 'UPLOADED') { c++; map[v.id] = `UP ${c}`; }
     });
     return map;
   }, [videos]);
 
+  /* ── TOGGLE CAMERA ── */
   const toggleVideo = async (video) => {
     const active = selectedVideos.some(v => v.id === video.id);
     if (active) {
       if (selectedVideos.length === 1) return;
       onVideosChange(selectedVideos.filter(v => v.id !== video.id));
-
-      // Stop inference on backend
       try {
         await fetch(`${API_BASE_URL}/sources/stop`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ index: video.droneIndex }),
         });
-      } catch (e) { console.error('Stop failed', e); }
-
+      } catch (e) { /* silent */ }
     } else {
       onVideosChange([...selectedVideos, video]);
-
-      // Start inference on backend
       try {
         await fetch(`${API_BASE_URL}/sources/start`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ index: video.droneIndex }),
         });
-      } catch (e) { console.error('Start failed', e); }
+      } catch (e) { /* silent */ }
     }
   };
 
-  const isSelected = (id) =>
-    selectedVideos.some(v => v.id === id);
+  const isSelected = (id) => selectedVideos.some(v => v.id === id);
 
-  /* ============================
-     UPLOAD LOGIC
-  ============================ */
+  /* ── UPLOADS ── */
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadMessage, setUploadMessage] = useState(null);
   const [uploadedVideos, setUploadedVideos] = useState([]);
 
-  // Fetch uploaded videos on mount
   useEffect(() => {
     const fetchUploads = async () => {
       try {
@@ -146,13 +103,11 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
           const data = await res.json();
           setUploadedVideos(data.uploads || []);
         }
-      } catch (e) {
-        console.error('Failed to fetch uploads:', e);
-      }
+      } catch (e) { /* silent */ }
     };
     fetchUploads();
-    const interval = setInterval(fetchUploads, 5000);
-    return () => clearInterval(interval);
+    const i = setInterval(fetchUploads, 5000);
+    return () => clearInterval(i);
   }, []);
 
   const uploadFile = async (file) => {
@@ -168,41 +123,29 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
     xhr.open('POST', `${API_BASE_URL}/upload`);
 
     xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) {
-        setUploadProgress((e.loaded / e.total) * 100);
-      }
+      if (e.lengthComputable) setUploadProgress((e.loaded / e.total) * 100);
     };
 
     xhr.onload = () => {
       setIsUploading(false);
-      // Accept any 2xx status code
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
           const response = JSON.parse(xhr.responseText);
           setUploadMessage({ type: 'success', text: 'STARTED' });
-
-          // Add uploaded video to selection
           const newVideo = {
             id: response.name,
             type: 'upload',
             stream: response.name,
             label: file.name.replace(/\.[^/.]+$/, '').toUpperCase().slice(0, 8),
           };
-
-          // Add to uploaded videos list
           setUploadedVideos(prev => [...prev, { name: response.name, original_name: file.name }]);
-
-          // Auto-select the uploaded video
           onVideosChange([...selectedVideos, newVideo]);
-
           setTimeout(() => setUploadMessage(null), 2000);
         } catch (e) {
-          console.error('Upload parse error:', e, xhr.responseText);
           setUploadMessage({ type: 'error', text: 'PARSE ERROR' });
           setTimeout(() => setUploadMessage(null), 3000);
         }
       } else {
-        console.error('Upload failed:', xhr.status, xhr.responseText);
         setUploadMessage({ type: 'error', text: `FAILED (${xhr.status})` });
         setTimeout(() => setUploadMessage(null), 3000);
       }
@@ -224,7 +167,6 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
       stream: upload.name,
       label: (upload.original_name || upload.name).replace(/\.[^/.]+$/, '').toUpperCase().slice(0, 8),
     };
-
     const active = selectedVideos.some(v => v.id === upload.name);
     if (active) {
       if (selectedVideos.length === 1) return;
@@ -234,47 +176,53 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
     }
   };
 
-  /* ============================
-     RENDER
-  ============================ */
+  /* ── RENDER ── */
   return (
-    <div className="w-full h-12 bg-black/60 border-t border-cyan-500/30 flex items-center justify-between px-6 z-50 font-mono">
-      {/* ===== LEFT: SYSTEM STATUS ===== */}
-      <div className="flex items-center gap-6">
+    <div className="w-full h-11 bg-black/60 backdrop-blur-md border-t border-white/10 flex items-center justify-between px-5 z-50 font-mono shrink-0">
+
+      {/* LEFT — Status */}
+      <div className="flex items-center gap-4">
         <div className="flex items-center gap-2">
-          <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-          <span className="text-[10px] text-emerald-500 font-bold uppercase tracking-[0.2em]">
-            Network: Online
+          <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
+          <span className="text-[11px] text-emerald-400/90 font-bold tracking-wider">ONLINE</span>
+        </div>
+
+        <span className="text-white/10">|</span>
+
+        <div className="flex items-center gap-1.5">
+          <Globe className="w-3 h-3 text-white/30" />
+          <span className="text-[11px] text-white/60 tracking-wider">
+            {selectedVideos.length}<span className="text-white/30">/{videos.length + uploadedVideos.length}</span> FEEDS
           </span>
         </div>
 
-        <div className="flex items-center gap-2 border-l border-white/10 pl-6">
-          <Globe className="w-3 h-3 text-cyan-500/60" />
-          <span className="text-[10px] text-cyan-500/60 uppercase tracking-widest">
-            Nodes: {selectedVideos.length}/{(videos.length + uploadedVideos.length).toString().padStart(2, '0')}
+        <span className="text-white/10">|</span>
+
+        <div className="flex items-center gap-1.5">
+          <Activity className="w-3 h-3 text-white/30" />
+          <span className="text-[11px] text-white/60 tabular-nums">
+            {fps !== null ? fps.toFixed(0) : '--'} <span className="text-white/30">FPS</span>
           </span>
         </div>
       </div>
 
-      {/* ===== CENTER: CAMERA SELECTOR & UPLOADER ===== */}
-      <div className="flex items-center gap-4">
-        <div className="flex items-center gap-1 border border-white/10 px-1 py-0.5 max-w-[600px] overflow-x-auto scrollbar-thin scrollbar-track-transparent scrollbar-thumb-cyan-500/30 hover:scrollbar-thumb-cyan-500/50" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(6,182,212,0.3) transparent' }}>
-          {/* Drone sources */}
+      {/* CENTER — Camera selector + Upload */}
+      <div className="flex items-center gap-3">
+        <div className="flex items-center gap-px bg-white/[0.03] border border-white/[0.06] rounded-sm overflow-x-auto max-w-[560px]"
+             style={{ scrollbarWidth: 'none' }}>
           {videos.map((vid, idx) => {
-            const label =
-              vid.label === 'UPLOADED'
-                ? uploadedMap[vid.id] || 'UP'
-                : vid.label || `CAM ${idx + 1}`;
-
+            const label = vid.label === 'UPLOADED'
+              ? uploadedMap[vid.id] || 'UP'
+              : vid.label || `CAM ${idx + 1}`;
             return (
               <button
                 key={vid.id}
                 onClick={() => toggleVideo(vid)}
                 className={clsx(
-                  'px-3 py-1 text-[10px] uppercase tracking-wider font-bold transition-colors whitespace-nowrap',
+                  'px-2.5 py-1 text-[10px] uppercase tracking-wider font-bold transition-all whitespace-nowrap',
                   isSelected(vid.id)
-                    ? 'bg-cyan-500 text-black'
-                    : 'text-white/40 hover:text-white/70'
+                    ? 'bg-cyan-500/90 text-black'
+                    : 'text-white/30 hover:text-white/60 hover:bg-white/[0.04]'
                 )}
                 title={DRONE_REGION_MAP[vid.id] || label}
               >
@@ -283,39 +231,36 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
             );
           })}
 
-          {/* Uploaded videos separator */}
           {uploadedVideos.length > 0 && (
-            <div className="w-px h-4 bg-white/20 mx-1" />
+            <div className="w-px h-4 bg-white/10 mx-0.5 shrink-0" />
           )}
 
-          {/* Uploaded video sources */}
           {uploadedVideos.map((upload) => {
             const label = (upload.original_name || upload.name)
               .replace(/\.[^/.]+$/, '')
               .toUpperCase()
               .slice(0, 8);
             const isActive = selectedVideos.some(v => v.id === upload.name);
-
             return (
               <button
                 key={upload.name}
                 onClick={() => toggleUploadedVideo(upload)}
                 className={clsx(
-                  'px-3 py-1 text-[10px] uppercase tracking-wider font-bold transition-colors whitespace-nowrap',
+                  'px-2.5 py-1 text-[10px] uppercase tracking-wider font-bold transition-all whitespace-nowrap',
                   isActive
-                    ? 'bg-emerald-500 text-black'
-                    : 'text-emerald-400/40 hover:text-emerald-400/70'
+                    ? 'bg-emerald-500/90 text-black'
+                    : 'text-emerald-400/30 hover:text-emerald-400/60 hover:bg-white/[0.04]'
                 )}
                 title={`Uploaded: ${upload.original_name || upload.name}`}
               >
-                📹 {label}
+                {label}
               </button>
             );
           })}
         </div>
 
-        {/* Tactical Uploader Small UI */}
-        <div className="relative group">
+        {/* Upload button */}
+        <div className="relative">
           <input
             type="file"
             accept=".mp4,.mkv,.avi,.mov"
@@ -324,41 +269,35 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
             disabled={isUploading}
           />
           <div className={clsx(
-            "px-4 py-1 border border-cyan-500/30 text-[10px] font-black uppercase tracking-[0.2em] transition-all duration-300 flex items-center gap-2",
-            isUploading ? "bg-cyan-500/20" : "hover:bg-cyan-500 hover:text-black cursor-pointer shadow-[0_0_10px_rgba(6,182,212,0.1)] hover:shadow-[0_0_15px_rgba(6,182,212,0.3)]"
+            'flex items-center gap-1.5 px-3 py-1 border text-[10px] font-bold uppercase tracking-wider transition-all',
+            isUploading
+              ? 'border-cyan-500/20 bg-cyan-500/10 text-cyan-400'
+              : 'border-white/10 text-white/40 hover:border-cyan-500/40 hover:text-cyan-400 hover:bg-cyan-500/10 cursor-pointer'
           )}>
             {isUploading ? (
-              <div className="flex items-center gap-2">
-                <div className="w-12 h-1 bg-white/10 overflow-hidden relative">
-                  <div className="absolute inset-0 bg-cyan-400" style={{ width: `${uploadProgress}%` }} />
+              <>
+                <div className="w-10 h-1 bg-white/10 rounded-full overflow-hidden">
+                  <div className="h-full bg-cyan-400 transition-all" style={{ width: `${uploadProgress}%` }} />
                 </div>
-                <span className="text-cyan-400">{Math.round(uploadProgress)}%</span>
-              </div>
+                <span>{Math.round(uploadProgress)}%</span>
+              </>
             ) : uploadMessage ? (
-              <span className={uploadMessage.type === 'success' ? 'text-emerald-500' : 'text-red-500'}>
+              <span className={uploadMessage.type === 'success' ? 'text-emerald-400' : 'text-red-400'}>
                 {uploadMessage.text}
               </span>
             ) : (
-              <span>Upload_Feed</span>
+              <>
+                <Upload className="w-3 h-3" />
+                <span>UPLOAD</span>
+              </>
             )}
           </div>
         </div>
       </div>
 
-      {/* ===== RIGHT: DIAGNOSTICS ===== */}
-      <div className="flex items-center gap-6">
-        <div className="flex items-center gap-2">
-          <Activity className="w-3 h-3 text-cyan-500/60" />
-          <span className="text-[10px] text-cyan-500/80">
-            {fps !== null ? fps.toFixed(0) : '--'} FPS
-          </span>
-        </div>
-
-        <div className="flex items-center gap-2 border-l border-white/10 pl-6">
-          <span className="text-[10px] text-cyan-500/80">
-            {currentTime}
-          </span>
-        </div>
+      {/* RIGHT — Branding */}
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] text-white/20 tracking-widest">IRIS COMMAND v1.0</span>
       </div>
     </div>
   );

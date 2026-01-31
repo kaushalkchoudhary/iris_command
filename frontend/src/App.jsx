@@ -27,6 +27,12 @@ const MODE_CONFIG = {
   forensics: {
     theme: { glow: 'rgba(245,158,11,0.15)', grid: 'rgba(245, 158, 11, 0.3)', accent: 'amber' },
   },
+  crowd: {
+    theme: { glow: 'rgba(20,184,166,0.15)', grid: 'rgba(20, 184, 166, 0.3)', accent: 'teal' },
+  },
+  safety: {
+    theme: { glow: 'rgba(16,185,129,0.15)', grid: 'rgba(16, 185, 129, 0.3)', accent: 'emerald' },
+  },
 };
 
 export { MODE_CONFIG, API_BASE_URL };

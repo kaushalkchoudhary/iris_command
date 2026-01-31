@@ -7,9 +7,8 @@ import {
     GitBranch,
     Crosshair,
     ChevronRight,
-    Search,
-    Power,
-    Settings,
+    Users,
+    ShieldCheck,
     Cpu
 } from 'lucide-react';
 
@@ -57,42 +56,58 @@ const USE_CASES = [
         bgGlow: 'bg-amber-400/10',
         stats: 'Neural Engine',
         status: 'Operational'
+    },
+    {
+        id: 'crowd',
+        title: 'Crowd Analytics',
+        description: 'Density mapping, bottleneck identification, and real-time crowd flow monitoring.',
+        icon: Users,
+        color: 'text-teal-400',
+        borderColor: 'border-teal-400/30',
+        bgGlow: 'bg-teal-400/10',
+        stats: '08 Active Nodes',
+        status: 'Idle'
+    },
+    {
+        id: 'safety',
+        title: 'Public Safety',
+        description: 'Anomaly detection, unattended object tracking, and automated threat alerting.',
+        icon: ShieldCheck,
+        color: 'text-emerald-400',
+        borderColor: 'border-emerald-400/30',
+        bgGlow: 'bg-emerald-400/10',
+        stats: '23 Active Nodes',
+        status: 'Operational'
     }
 ];
 
 const WelcomeScreen = () => {
     const navigate = useNavigate();
     return (
-        <div className="fixed inset-0 bg-[#050a14] z-[100] flex flex-col overflow-hidden">
+        <div className="fixed inset-0 bg-[#050a14] z-[100] flex flex-col">
             {/* Background Effects */}
-            <div className="absolute inset-0 z-0 opacity-20 pointer-events-none"
+            <div className="fixed inset-0 z-0 opacity-20 pointer-events-none"
                 style={{
                     backgroundImage: 'linear-gradient(rgba(0, 255, 255, 0.2) 1px, transparent 1px), linear-gradient(90deg, rgba(0, 255, 255, 0.2) 1px, transparent 1px)',
                     backgroundSize: '30px 30px'
                 }}>
             </div>
-            <div className="absolute inset-0 z-0 bg-[radial-gradient(circle_at_center,transparent_0%,#000_100%)] opacity-80" />
+            <div className="fixed inset-0 z-0 bg-[radial-gradient(circle_at_center,transparent_0%,#000_100%)] opacity-80 pointer-events-none" />
 
-            {/* Top Bar */}
-            <header className="relative z-10 w-full h-20 border-b border-white/5 bg-black/40 backdrop-blur-md flex items-center justify-between px-8">
+            {/* Top Bar — sticky */}
+            <header className="sticky top-0 z-20 w-full h-20 border-b border-white/5 bg-black/40 backdrop-blur-md flex items-center justify-between px-8 shrink-0">
                 <div className="flex items-center gap-6" />
                 <div className="flex items-center gap-6">
                     <div className="flex items-center gap-2">
                         <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
                         <span className="text-[10px] text-emerald-500 font-bold tracking-widest uppercase">Nodes: Operational</span>
                     </div>
-                    <div className="h-6 w-[1px] bg-white/10" />
-                    <button className="p-2 text-white/40 hover:text-white transition-colors">
-                        <Settings className="w-4 h-4" />
-                    </button>
-                    <button className="p-2 text-white/40 hover:text-rose-500 transition-colors">
-                        <Power className="w-4 h-4" />
-                    </button>
                 </div>
             </header>
 
-            {/* Main Content */}
-            <main className="relative z-10 flex-1 flex flex-col items-center justify-center p-8 max-w-7xl mx-auto w-full">
+            {/* Scrollable Content */}
+            <div className="flex-1 overflow-y-auto">
+            <main className="relative z-10 flex flex-col items-center p-8 pt-16 pb-8 max-w-7xl mx-auto w-full">
                 <motion.div
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -122,7 +137,7 @@ const WelcomeScreen = () => {
                     </div>
                 </motion.div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 w-full">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 w-full">
                     {USE_CASES.map((useCase, idx) => (
                         <motion.button
                             key={useCase.id}
@@ -153,7 +168,7 @@ const WelcomeScreen = () => {
                                 <div className="pt-4 border-t border-white/5 flex items-center justify-between">
                                     <div className="flex flex-col">
                                         <span className="text-[10px] text-white/30 uppercase font-black tracking-widest">{useCase.stats}</span>
-                                        <span className={`text-[10px] font-bold uppercase ${useCase.status === 'Operational' ? 'text-emerald-500' : 'text-white/20'}`}>{useCase.status}</span>
+                                        <span className={`text-[10px] font-bold uppercase ${useCase.status === 'Operational' ? 'text-emerald-500' : useCase.status === 'Idle' ? 'text-cyan-500/50' : 'text-white/20'}`}>{useCase.status}</span>
                                     </div>
                                     <ChevronRight className="w-5 h-5 text-white/20 group-hover:text-white group-hover:translate-x-1 transition-all" />
                                 </div>
@@ -166,20 +181,11 @@ const WelcomeScreen = () => {
                     ))}
                 </div>
 
-                {/* Search / Global Tools */}
-                <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    transition={{ delay: 0.8 }}
-                    className="mt-16 flex items-center gap-4 px-6 py-3 bg-white/5 border border-white/10 rounded-full cursor-pointer hover:bg-white/10 transition-all"
-                >
-                    <Search className="w-4 h-4 text-white/40" />
-                    <span className="text-sm text-white/40 font-bold uppercase tracking-widest">Discover additional surveillance modules...</span>
-                </motion.div>
             </main>
+            </div>
 
-            {/* Footer Status */}
-            <footer className="relative z-10 w-full h-12 border-t border-white/5 bg-black/20 flex items-center justify-between px-8 text-[10px] font-mono text-white/20">
+            {/* Footer Status — sticky bottom */}
+            <footer className="sticky bottom-0 z-20 w-full h-12 border-t border-white/5 bg-black/40 backdrop-blur-md flex items-center justify-between px-8 text-[10px] font-mono text-white/20 shrink-0">
                 <div className="flex gap-8">
                     <div className="flex gap-2"><span className="text-white/40">GEO_LOC:</span> BANGALORE_HUB</div>
                     <div className="flex gap-2"><span className="text-white/40">LATENCY:</span> 12.4ms</div>
