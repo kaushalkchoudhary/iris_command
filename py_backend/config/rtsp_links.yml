@@ -1,0 +1,67 @@
+overlays:
+  bcpdrone2:
+    bboxes: false
+    confidence: 0.1
+    heatmap: true
+    trails: false
+  bcpdrone3:
+    bboxes: false
+    confidence: 0.2
+    heatmap: true
+    trails: false
+  bcpdrone4:
+    bboxes: true
+    heatmap: false
+    trails: true
+  bcpdrone5:
+    bboxes: false
+    heatmap: true
+    trails: false
+  bcpdrone6:
+    bboxes: true
+    heatmap: true
+    trails: true
+  bcpdrone7:
+    bboxes: true
+    heatmap: false
+    trails: false
+  bcpdrone8:
+    bboxes: false
+    confidence: 0.05
+    heatmap: true
+    trails: false
+  bcpdrone9:
+    bboxes: true
+    confidence: 0.1
+    heatmap: false
+    trails: false
+  bcpdrone10:
+    heatmap: true
+    trails: false
+    bboxes: false
+    confidence: 0.1
+  bcpdrone11:
+    bboxes: true
+    heatmap: true
+    trails: true
+  bcpdrone12:
+    heatmap: false
+    trails: false
+    bboxes: false
+    confidence: 0.1
+rtsp_links:
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone1
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone2
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone3
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone4
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone5
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone6
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone7
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone8
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone9
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone10
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone11
+- rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone12
+active_sources:
+- 5
+- 6

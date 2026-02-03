@@ -1,0 +1,38 @@
+# IRIS Command MediaMTX Systemd Service
+#
+# Installation:
+#   sudo cp iris-mediamtx.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable iris-mediamtx
+#   sudo systemctl start iris-mediamtx
+#
+# Commands:
+#   sudo systemctl start iris-mediamtx
+#   sudo systemctl stop iris-mediamtx
+#   sudo systemctl restart iris-mediamtx
+#   sudo systemctl status iris-mediamtx
+#   journalctl -u iris-mediamtx -f   # Follow logs
+
+[Unit]
+Description=IRIS Command MediaMTX RTSP Server
+After=network.target
+Before=iris-backend.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/Desktop/iris_command/py_backend
+
+ExecStart=/home/ubuntu/Desktop/iris_command/py_backend/service/run_mediamtx.sh
+
+# Restart policy
+Restart=on-failure
+RestartSec=3
+
+# Logging
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target
