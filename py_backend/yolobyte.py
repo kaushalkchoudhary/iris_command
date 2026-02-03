@@ -736,6 +736,7 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
                             "trails": raw.get("trails", True),
                             "bboxes": raw.get("bboxes", True),
                             "confidence": raw.get("confidence", conf_thresh),
+                            "bbox_label": str(raw.get("bbox_label", "speed")),
                         }
                     else:
                         cached_overlay = {
@@ -745,6 +746,7 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
                             "trails": bool(raw.get("trails", True)),
                             "bboxes": bool(raw.get("bboxes", True)),
                             "confidence": float(raw.get("confidence", conf_thresh)),
+                            "bbox_label": str(raw.get("bbox_label", "speed")),
                         }
             except Exception:
                 pass
@@ -879,6 +881,7 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
                     2: (0, 210, 130),     # green
                     3: (210, 180, 0),     # cyan-ish
                 }
+                bbox_label_mode = overlay.get("bbox_label", "speed")
                 smoothed_xyxy = bbox_smoother.smooth(tracked)
                 tids = tracked.tracker_id
                 class_ids = tracked.class_id
@@ -887,18 +890,24 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
                     x1, y1, x2, y2 = map(int, smoothed_xyxy[i])
                     tid = tids[i]
 
-                    # Determine speed band for this vehicle
+                    # Determine speed for color coding
                     pos = analytics.track_positions.get(tid)
                     spd_px = pos[2] if pos else 0.0
                     spd_cls = classify_speed(spd_px)
-                    spd_label = _SPEED_LABELS[spd_cls]
                     spd_color = _SPEED_COLORS[spd_cls]
 
-                    # Bbox: color matches speed
-                    cv2.rectangle(out, (x1, y1), (x2, y2), spd_color, 1)
+                    if bbox_label_mode == "speed":
+                        # Flow mode: show speed band, color-coded bbox
+                        label = _SPEED_LABELS[spd_cls]
+                        box_color = spd_color
+                    else:
+                        # Traffic/vehicle mode: show class name, neutral bbox
+                        cls_name = CLASS_NAMES.get(int(class_ids[i]), "") if class_ids is not None else ""
+                        label = cls_name.upper() if cls_name else f"#{tid}"
+                        box_color = (0, 255, 255)
 
-                    # Label: speed band
-                    label = spd_label
+                    cv2.rectangle(out, (x1, y1), (x2, y2), box_color, 1)
+
                     ly = y1 - 4 if y1 > 15 else y2 + 12
                     cv2.putText(out, label, (x1, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
             elif bbox_smoother:
@@ -1079,6 +1088,7 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
                             "trails": raw.get("trails", True),
                             "bboxes": raw.get("bboxes", True),
                             "confidence": raw.get("confidence", conf_thresh),
+                            "bbox_label": str(raw.get("bbox_label", "speed")),
                         }
                     else:
                         cached_overlay = {
@@ -1088,6 +1098,7 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
                             "trails": bool(raw.get("trails", True)),
                             "bboxes": bool(raw.get("bboxes", True)),
                             "confidence": float(raw.get("confidence", conf_thresh)),
+                            "bbox_label": str(raw.get("bbox_label", "speed")),
                         }
             except Exception:
                 pass

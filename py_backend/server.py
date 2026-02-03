@@ -157,11 +157,11 @@ active_mode: Optional[str] = None
 
 # Fixed overlay config per mode
 MODE_OVERLAYS = {
-    "congestion": {"heatmap": True, "heatmap_full": True, "heatmap_trails": True, "trails": False, "bboxes": True},
-    "vehicle":    {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": True},
-    "flow":       {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": True,  "bboxes": True},
-    "forensics":  {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": False},
-    "crowd":      {"heatmap": True, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": False},
+    "congestion": {"heatmap": True, "heatmap_full": True, "heatmap_trails": True, "trails": False, "bboxes": True, "bbox_label": "class"},
+    "vehicle":    {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": True, "bbox_label": "class"},
+    "flow":       {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": True,  "bboxes": True, "bbox_label": "speed"},
+    "forensics":  {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": False, "bbox_label": "class"},
+    "crowd":      {"heatmap": True, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": False, "bbox_label": "class"},
 }
 
 MODE_CONFIDENCE = {
