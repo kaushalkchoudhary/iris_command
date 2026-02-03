@@ -154,8 +154,8 @@ const MetricsHUD = ({ metrics, useCase, samResult }) => {
     const density = m.traffic_density ?? 0;
     const mobility = m.mobility_index ?? 0;
     const count = m.detection_count ?? 0;
-    const congColor = congestion >= 60 ? 'text-red-400' : congestion >= 35 ? 'text-amber-400' : 'text-cyan-300';
-    const mobColor = mobility >= 70 ? 'text-emerald-300' : mobility >= 40 ? 'text-amber-300' : 'text-red-300';
+    const congColor = congestion >= 60 ? 'text-red-400' : congestion >= 35 ? 'text-orange-400' : 'text-green-300';
+    const mobColor = mobility >= 70 ? 'text-green-300' : mobility >= 40 ? 'text-yellow-300' : 'text-red-300';
     return (
       <>
         {/* Left panel */}
@@ -201,7 +201,7 @@ const MetricsHUD = ({ metrics, useCase, samResult }) => {
           {leftClasses.map(([cls, cnt]) => (
             <MetricCard key={cls} borderColor="emerald" className="py-1.5">
               <div className="flex items-baseline justify-between gap-2">
-                <span className="text-[8px] font-bold uppercase tracking-widest text-emerald-400/70">{cls.toUpperCase()}</span>
+                <span className="text-[8px] font-bold uppercase tracking-widest text-emerald-400/60">{cls.toUpperCase()}</span>
                 <span className="text-lg font-black tabular-nums leading-none text-emerald-200">{cnt}</span>
               </div>
             </MetricCard>
@@ -213,7 +213,7 @@ const MetricsHUD = ({ metrics, useCase, samResult }) => {
             {rightClasses.map(([cls, cnt]) => (
               <MetricCard key={cls} borderColor="emerald" className="py-1.5">
                 <div className="flex items-baseline justify-between gap-2">
-                  <span className="text-[8px] font-bold uppercase tracking-widest text-emerald-400/70">{cls.toUpperCase()}</span>
+                  <span className="text-[8px] font-bold uppercase tracking-widest text-emerald-400/60">{cls.toUpperCase()}</span>
                   <span className="text-lg font-black tabular-nums leading-none text-emerald-200">{cnt}</span>
                 </div>
               </MetricCard>
@@ -231,7 +231,7 @@ const MetricsHUD = ({ metrics, useCase, samResult }) => {
     const slow = m.slow_pct ?? 0;
     const medium = m.medium_pct ?? 0;
     const fast = m.fast_pct ?? 0;
-    const mobilityColor = mobility >= 70 ? 'text-emerald-300' : mobility >= 40 ? 'text-amber-300' : 'text-red-300';
+    const mobilityColor = mobility >= 70 ? 'text-green-300' : mobility >= 40 ? 'text-yellow-300' : 'text-red-300';
     return (
       <>
         {/* Left panel */}
@@ -247,28 +247,28 @@ const MetricsHUD = ({ metrics, useCase, samResult }) => {
         </div>
         {/* Right panel — speed bands */}
         <div className="absolute right-3 top-1/2 -translate-y-1/2 z-20 pointer-events-none flex flex-col gap-1">
-          <MetricCard borderColor="red" className="py-1">
+          <MetricCard borderColor="purple" className="py-1">
             <div className="flex items-baseline justify-between gap-2">
               <span className="text-[8px] font-bold uppercase tracking-widest text-red-400/80">STALLED</span>
               <span className="text-base font-black tabular-nums leading-none text-red-400">{stalled}%</span>
             </div>
           </MetricCard>
-          <MetricCard borderColor="amber" className="py-1">
+          <MetricCard borderColor="purple" className="py-1">
             <div className="flex items-baseline justify-between gap-2">
-              <span className="text-[8px] font-bold uppercase tracking-widest text-amber-400/80">SLOW</span>
-              <span className="text-base font-black tabular-nums leading-none text-amber-300">{slow}%</span>
+              <span className="text-[8px] font-bold uppercase tracking-widest text-orange-400/80">SLOW</span>
+              <span className="text-base font-black tabular-nums leading-none text-orange-300">{slow}%</span>
             </div>
           </MetricCard>
-          <MetricCard borderColor="emerald" className="py-1">
+          <MetricCard borderColor="purple" className="py-1">
             <div className="flex items-baseline justify-between gap-2">
-              <span className="text-[8px] font-bold uppercase tracking-widest text-emerald-400/80">MEDIUM</span>
-              <span className="text-base font-black tabular-nums leading-none text-emerald-300">{medium}%</span>
+              <span className="text-[8px] font-bold uppercase tracking-widest text-yellow-400/80">MEDIUM</span>
+              <span className="text-base font-black tabular-nums leading-none text-yellow-300">{medium}%</span>
             </div>
           </MetricCard>
-          <MetricCard borderColor="cyan" className="py-1">
+          <MetricCard borderColor="purple" className="py-1">
             <div className="flex items-baseline justify-between gap-2">
-              <span className="text-[8px] font-bold uppercase tracking-widest text-cyan-400/80">FAST</span>
-              <span className="text-base font-black tabular-nums leading-none text-cyan-300">{fast}%</span>
+              <span className="text-[8px] font-bold uppercase tracking-widest text-green-400/80">FAST</span>
+              <span className="text-base font-black tabular-nums leading-none text-green-300">{fast}%</span>
             </div>
           </MetricCard>
         </div>
@@ -512,10 +512,9 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
       <div className="absolute bottom-4 left-4 w-2 h-2 border-b border-l border-white/20 z-20 pointer-events-none" />
       <div className="absolute bottom-4 right-4 w-2 h-2 border-b border-r border-white/20 z-20 pointer-events-none" />
 
-      {/* Drone label - below top-left corner accents */}
-      <div className="absolute top-[26px] left-0 z-30 pointer-events-none">
-        <div className="flex items-center gap-1.5 pl-2.5 pr-3 py-0.5 bg-black/70 border-r border-b border-cyan-400/40 backdrop-blur-md shadow-[0_0_12px_rgba(6,182,212,0.15)]"
-             style={{ borderLeft: '2px solid rgba(6,182,212,0.5)' }}>
+      {/* Drone label - inside corner accents, below top-left inner bracket */}
+      <div className="absolute top-[25px] left-5 z-30 pointer-events-none">
+        <div className="flex items-center gap-1.5 px-2 py-0.5 bg-black/70 border border-cyan-400/30 backdrop-blur-md shadow-[0_0_10px_rgba(6,182,212,0.12)]">
           <div className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
           <span className="text-[10px] font-black uppercase tracking-[0.15em] text-cyan-300">
             {video.label || video.id}
