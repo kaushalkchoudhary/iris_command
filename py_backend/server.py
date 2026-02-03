@@ -1,5 +1,6 @@
 """FastAPI control server: all API endpoints, overlay/frame/metrics management, FFmpeg publishing."""
 
+import os
 import yaml
 import uuid
 import shutil
@@ -18,7 +19,7 @@ import requests as http_requests
 import numpy as np
 import cv2
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -28,9 +29,13 @@ from sam import (
     load_sam_model, sam_annotate_frame, sam_worker,
     sam_model_loaded, sam_results_lock, sam_results, sam_threads,
 )
-from log_utils import new_log_path
+from log_utils import env_log_path, new_log_path
 
-MEDIAMTX_API = "http://127.0.0.1:9997"
+IRIS_LOCAL = os.environ.get("IRIS_LOCAL", "0") == "1"
+DEFAULT_MEDIAMTX_HOST = "127.0.0.1" if IRIS_LOCAL else "mediamtx1.stagingbot.xyz"
+MEDIAMTX_HOST = os.environ.get("IRIS_MEDIAMTX_HOST", DEFAULT_MEDIAMTX_HOST)
+DEFAULT_MEDIAMTX_API = f"http://{MEDIAMTX_HOST}:9997"
+MEDIAMTX_API = os.environ.get("IRIS_MEDIAMTX_API", DEFAULT_MEDIAMTX_API)
 
 
 # ── Pydantic models ──
@@ -131,18 +136,28 @@ jobs: Dict[str, dict] = {}
 source_lock = threading.Lock()
 running_sources: Dict[int, dict] = {}
 
-# FFmpeg RTSP publishers
+# FFmpeg RTSP publishers (processed stream -> MediaMTX)
 ffmpeg_publishers: Dict[str, subprocess.Popen] = {}
 ffmpeg_log_files: Dict[str, object] = {}
-FFMPEG_PUBLISH_PORT = 9010
-MEDIAMTX_RTSP_PORT = 8554
+ffmpeg_writer_threads: Dict[str, threading.Thread] = {}
+ffmpeg_stop_events: Dict[str, threading.Event] = {}
+ffmpeg_next_start: Dict[str, float] = {}
+MEDIAMTX_RTSP_PORT = int(os.environ.get("IRIS_MEDIAMTX_RTSP_PORT", "8554"))
+# Always publish to the local MediaMTX instance (same machine).
+# The remote hostname is only for frontend WebRTC consumption via Cloudflare.
+MEDIAMTX_PUBLISH_BASE = os.environ.get(
+    "IRIS_MEDIAMTX_PUBLISH_BASE",
+    f"rtsp://127.0.0.1:{MEDIAMTX_RTSP_PORT}",
+)
+PROCESSED_FPS = int(os.environ.get("IRIS_PROCESSED_FPS", "15"))
+USE_NVENC = os.environ.get("IRIS_USE_NVENC", "1") == "1"
 
 # Active mode tracking
 active_mode: Optional[str] = None
 
 # Fixed overlay config per mode
 MODE_OVERLAYS = {
-    "congestion": {"heatmap": True, "heatmap_full": True, "heatmap_trails": False, "trails": False, "bboxes": False},
+    "congestion": {"heatmap": True, "heatmap_full": True, "heatmap_trails": True, "trails": False, "bboxes": True},
     "vehicle":    {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": True},
     "flow":       {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": True,  "bboxes": True},
     "forensics":  {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": False},
@@ -195,7 +210,8 @@ def _write_frontend_log(entry: FrontendLogEntry):
     global frontend_log_file
     with frontend_log_lock:
         if frontend_log_file is None:
-            frontend_log_file = open(new_log_path("frontend"), "a", buffering=1)
+            log_path = env_log_path("frontend") or new_log_path("frontend")
+            frontend_log_file = open(log_path, "a", buffering=1)
         ts = entry.ts or time.strftime("%Y-%m-%dT%H:%M:%S")
         level = (entry.level or "info").upper()
         msg = entry.message or ""
@@ -241,58 +257,152 @@ def mediamtx_remove_path(name: str):
 
 # ── FFmpeg publisher management ──
 
-def _start_ffmpeg_publisher(name: str, retry_count: int = 3):
-    _stop_ffmpeg_publisher(name)
-    mjpeg_url = f"http://127.0.0.1:{FFMPEG_PUBLISH_PORT}/api/stream/{name}"
-    rtsp_url = f"rtsp://127.0.0.1:{MEDIAMTX_RTSP_PORT}/processed_{name}"
+def _wait_for_frame(name: str, timeout: float = 5.0):
+    deadline = time.time() + timeout
+    with frame_lock:
+        last_seq = frame_sequences.get(name, 0)
+    while time.time() < deadline:
+        with frame_lock:
+            if frame_sequences.get(name, 0) > last_seq:
+                data = frame_buffer.get(name)
+                if data:
+                    return data
+            frame_lock.wait(timeout=0.3)
+    return None
 
-    for attempt in range(retry_count):
+
+def _ffmpeg_writer_worker(name: str, proc: subprocess.Popen, stop_event: threading.Event, width: int, height: int):
+    last_seq = -1
+    frame_interval = 1.0 / PROCESSED_FPS
+    next_send_time = time.monotonic()
+    while not stop_event.is_set():
+        with frame_lock:
+            while frame_sequences.get(name, 0) <= last_seq and not stop_event.is_set():
+                frame_lock.wait(timeout=0.3)
+            seq = frame_sequences.get(name, 0)
+            data = frame_buffer.get(name)
+
+        if stop_event.is_set():
+            break
+        if not data or seq <= last_seq:
+            time.sleep(0.01)
+            continue
+
+        frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+        last_seq = seq
+        if frame is None:
+            continue
+        if frame.shape[1] != width or frame.shape[0] != height:
+            print(f"[FFMPEG] Frame size changed for {name} ({width}x{height} -> {frame.shape[1]}x{frame.shape[0]}), restarting.")
+            break
+
+        # Rate-limit to match PROCESSED_FPS so FFmpeg timestamps stay in sync
+        now = time.monotonic()
+        sleep_dur = next_send_time - now
+        if sleep_dur > 0:
+            time.sleep(sleep_dur)
+        next_send_time = max(time.monotonic(), next_send_time) + frame_interval
+
         try:
-            resp = http_requests.get(mjpeg_url, stream=True, timeout=2)
-            if resp.status_code == 200:
-                resp.close()
-                break
-        except Exception:
-            pass
-        print(f"[FFMPEG] Waiting for {name} stream to be available... (attempt {attempt + 1}/{retry_count})")
-        time.sleep(2)
+            proc.stdin.write(frame.tobytes())
+            proc.stdin.flush()
+        except BrokenPipeError:
+            break
+        except Exception as e:
+            print(f"[FFMPEG] Writer error for {name}: {e}")
+            break
+
+    try:
+        if proc.stdin:
+            proc.stdin.close()
+    except Exception:
+        pass
+
+
+def _start_ffmpeg_publisher(name: str, wait_timeout: float = 8.0) -> bool:
+    _stop_ffmpeg_publisher(name)
+    rtsp_url = f"{MEDIAMTX_PUBLISH_BASE}/processed_{name}"
+
+    jpeg_data = _wait_for_frame(name, timeout=wait_timeout)
+    if not jpeg_data:
+        print(f"[FFMPEG] No frames available for {name}, skipping publisher start.")
+        return False
+
+    frame = cv2.imdecode(np.frombuffer(jpeg_data, np.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        print(f"[FFMPEG] Failed to decode first frame for {name}, skipping publisher start.")
+        return False
+
+    height, width = frame.shape[:2]
+    if USE_NVENC:
+        encoder_args = [
+            "-c:v", "h264_nvenc",
+            "-preset", "p1",
+            "-tune", "ll",
+            "-rc", "cbr",
+            "-b:v", "2M",
+            "-maxrate", "2M",
+            "-bufsize", "1M",
+        ]
+    else:
+        encoder_args = [
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-tune", "zerolatency",
+        ]
 
     cmd = [
         "ffmpeg",
         "-nostdin",
         "-loglevel", "warning",
-        "-f", "mjpeg",
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "10",
-        "-reconnect_at_eof", "1",
-        "-i", mjpeg_url,
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-tune", "zerolatency",
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "-s", f"{width}x{height}",
+        "-r", str(PROCESSED_FPS),
+        "-i", "pipe:0",
+        "-vf", "format=yuv420p",
+        *encoder_args,
         "-g", "30",
         "-bf", "0",
-        "-pix_fmt", "yuv420p",
         "-f", "rtsp",
         "-rtsp_transport", "tcp",
         rtsp_url,
     ]
+
     try:
-        log_file = open(new_log_path(f"ffmpeg-{name}"), "a", buffering=1)
+        ffmpeg_log_path = env_log_path("ffmpeg") or (new_log_path("ffmpeg").parent / "ffmpeg.log")
+        ffmpeg_log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file = open(ffmpeg_log_path, "a", buffering=1)
         ffmpeg_log_files[name] = log_file
         proc = subprocess.Popen(
             cmd,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,
             stdout=log_file,
             stderr=log_file,
             start_new_session=True,
         )
         ffmpeg_publishers[name] = proc
+        stop_event = threading.Event()
+        ffmpeg_stop_events[name] = stop_event
+        thread = threading.Thread(
+            target=_ffmpeg_writer_worker,
+            args=(name, proc, stop_event, width, height),
+            daemon=True,
+        )
+        ffmpeg_writer_threads[name] = thread
+        thread.start()
         print(f"[FFMPEG] Started publisher for {name} -> processed_{name} (pid={proc.pid})")
+        return True
     except Exception as e:
         print(f"[FFMPEG] Failed to start publisher for {name}: {e}")
+        return False
 
 def _stop_ffmpeg_publisher(name: str):
+    ffmpeg_next_start.pop(name, None)
+    stop_event = ffmpeg_stop_events.pop(name, None)
+    if stop_event:
+        stop_event.set()
+
     proc = ffmpeg_publishers.pop(name, None)
     if proc:
         try:
@@ -303,6 +413,14 @@ def _stop_ffmpeg_publisher(name: str):
                 proc.kill()
             except Exception:
                 pass
+
+    thread = ffmpeg_writer_threads.pop(name, None)
+    if thread:
+        try:
+            thread.join(timeout=1)
+        except Exception:
+            pass
+
     log_file = ffmpeg_log_files.pop(name, None)
     if log_file:
         try:
@@ -320,7 +438,16 @@ def _ffmpeg_monitor_worker():
         try:
             for name in list(_ffmpeg_monitor_sources):
                 proc = ffmpeg_publishers.get(name)
+                now = time.time()
+                next_at = ffmpeg_next_start.get(name, 0)
+
                 if proc is None:
+                    if now >= next_at:
+                        ok = _start_ffmpeg_publisher(name)
+                        if not ok:
+                            ffmpeg_next_start[name] = now + 3.0
+                        else:
+                            ffmpeg_next_start.pop(name, None)
                     continue
 
                 poll = proc.poll()
@@ -338,13 +465,14 @@ def _ffmpeg_monitor_worker():
 
                     if source_active:
                         print(f"[FFMPEG] Publisher for {name} exited (code={poll}), restarting...")
-                        _start_ffmpeg_publisher(name)
+                        _stop_ffmpeg_publisher(name)
+                        ffmpeg_next_start[name] = now + 1.0
                     else:
                         _ffmpeg_monitor_sources.discard(name)
         except Exception as e:
             print(f"[FFMPEG Monitor] Error: {e}")
 
-        _ffmpeg_monitor_stop.wait(5)
+        _ffmpeg_monitor_stop.wait(2)
 
 def _ensure_ffmpeg_monitor():
     global _ffmpeg_monitor_thread
@@ -562,10 +690,22 @@ def _stop_all_sources():
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*", "https://iriscmdapi.stagingbot.xyz", "https://mediamtx1.stagingbot.xyz", "https://iriscommand.stagingbot.xyz"],
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
+
+@app.exception_handler(Exception)
+async def _global_exception_handler(request, exc):
+    """Return 500 with CORS headers so the browser doesn't mask the real error."""
+    import traceback
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc)},
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
 
 
 # ── Auth endpoints ──
@@ -766,14 +906,11 @@ def start_source(req: SourceStartRequest):
         overlays[name] = dict(overlay_config)
     print(f"[OVERLAY] {name} set from mode config: {overlay_config}")
 
-    def _delayed_ffmpeg_start(stream_name):
-        time.sleep(3)
-        _start_ffmpeg_publisher(stream_name)
-        _ffmpeg_monitor_sources.add(stream_name)
-        _ensure_ffmpeg_monitor()
-    threading.Thread(target=_delayed_ffmpeg_start, args=(name,), daemon=True).start()
+    _ffmpeg_monitor_sources.add(name)
+    ffmpeg_next_start[name] = time.time() + 3.0
+    _ensure_ffmpeg_monitor()
 
-    active = cfg.get("active_sources", [])
+    active = cfg.get("active_sources") or []
     if req.index not in active:
         active.append(req.index)
     cfg["active_sources"] = active
@@ -813,6 +950,13 @@ def stop_all_sources():
 @app.get("/api/metrics")
 def get_metrics():
     return get_all_metrics()
+
+@app.get("/api/processed/{name}/ready")
+def processed_ready(name: str):
+    proc = ffmpeg_publishers.get(name)
+    running = proc is not None and proc.poll() is None
+    has_frames = frame_sequences.get(name, 0) > 0
+    return {"name": name, "ready": bool(running and has_frames)}
 
 @app.get("/api/alerts")
 def api_get_alerts(limit: int = 20):
@@ -885,9 +1029,15 @@ upload_sources_lock = threading.Lock()
 upload_sources: Dict[str, dict] = {}
 
 @app.post("/api/upload")
-async def upload_video(file: UploadFile = File(...)):
+async def upload_video(file: UploadFile = File(...), mode: Optional[str] = Form(None)):
     if not file.filename.endswith((".mp4", ".mkv", ".avi", ".mov")):
         raise HTTPException(400, "Unsupported file format. Use MP4, MKV, AVI, or MOV.")
+
+    global active_mode
+    if mode and mode != active_mode:
+        print(f"[MODE] Switching from {active_mode} -> {mode} (upload)")
+        _stop_all_sources()
+        active_mode = mode
 
     job_id = uuid.uuid4().hex
     original_name = Path(file.filename).stem
@@ -925,12 +1075,9 @@ async def upload_video(file: UploadFile = File(...)):
     with jobs_lock:
         jobs[job_id] = {"id": job_id, "name": name, "status": "processing"}
 
-    def _delayed_ffmpeg_start(stream_name):
-        time.sleep(3)
-        _start_ffmpeg_publisher(stream_name)
-        _ffmpeg_monitor_sources.add(stream_name)
-        _ensure_ffmpeg_monitor()
-    threading.Thread(target=_delayed_ffmpeg_start, args=(name,), daemon=True).start()
+    _ffmpeg_monitor_sources.add(name)
+    ffmpeg_next_start[name] = time.time() + 3.0
+    _ensure_ffmpeg_monitor()
 
     return {
         "job_id": job_id,
@@ -1089,7 +1236,13 @@ def run_control_server(start_source_fn, start_upload_fn, initial_overlays):
     cfg = load_rtsp_config()
     rtsp_links = cfg.get("rtsp_links", [])
 
-    saved_overlays = cfg.get("overlays", {})
+    # Clear persisted runtime state so each run starts clean.
+    if cfg.get("active_sources") or cfg.get("overlays"):
+        cfg["active_sources"] = []
+        cfg["overlays"] = {}
+        save_rtsp_config(cfg)
+
+    saved_overlays = {}
     for name, state in saved_overlays.items():
         with overlay_lock:
             heatmap_val = state.get("heatmap", True)

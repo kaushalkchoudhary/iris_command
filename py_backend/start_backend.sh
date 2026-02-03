@@ -20,15 +20,14 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR/.."
 LOG_ROOT="$PROJECT_DIR/logs"
-DATE_DIR="$(date '+%Y-%m-%d')"
-LOG_DIR="$LOG_ROOT/$DATE_DIR"
+LOG_DIR="$LOG_ROOT"
 DATA_DIR="$SCRIPT_DIR/data"
 CONFIG_DIR="$SCRIPT_DIR/config"
 
 mkdir -p "$LOG_DIR"
-TS="$(date '+%H-%M-%S')"
-MEDIAMTX_LOG="$LOG_DIR/mediamtx-$TS.log"
-BACKEND_LOG="$LOG_DIR/backend-$TS.log"
+MEDIAMTX_LOG="$LOG_DIR/mediamtx.log"
+BACKEND_LOG="$LOG_DIR/backend.log"
+FRONTEND_LOG="$LOG_DIR/frontend.log"
 
 # Colors for output
 RED='\033[0;31m'
@@ -114,8 +113,9 @@ start_inference() {
     # This is critical for nohup/background operation
     PYTHONUNBUFFERED=1 \
     IRIS_LOG_PATH="$BACKEND_LOG" \
+    IRIS_FRONTEND_LOG_PATH="$FRONTEND_LOG" \
     OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp|buffer_size;262144|analyzeduration;50000|probesize;50000|fflags;nobuffer|flags;low_delay" \
-    "$PYTHON_BIN" -u app.py >/dev/null 2>&1 &
+    "$PYTHON_BIN" -u app.py >> "$BACKEND_LOG" 2>&1 &
 
     INFERENCE_PID=$!
     echo $INFERENCE_PID > "$LOG_DIR/inference.pid"
@@ -186,17 +186,15 @@ case "$1" in
         ;;
     logs)
         echo "=== Backend Log (latest) ==="
-        LATEST_BACKEND_LOG="$(ls -1t "$LOG_DIR"/backend-*.log 2>/dev/null | head -1)"
-        if [ -n "$LATEST_BACKEND_LOG" ]; then
-            tail -50 "$LATEST_BACKEND_LOG"
+        if [ -f "$BACKEND_LOG" ]; then
+            tail -50 "$BACKEND_LOG"
         else
             echo "No backend log found"
         fi
         echo ""
         echo "=== MediaMTX Log (latest) ==="
-        LATEST_MEDIAMTX_LOG="$(ls -1t "$LOG_DIR"/mediamtx-*.log 2>/dev/null | head -1)"
-        if [ -n "$LATEST_MEDIAMTX_LOG" ]; then
-            tail -30 "$LATEST_MEDIAMTX_LOG"
+        if [ -f "$MEDIAMTX_LOG" ]; then
+            tail -30 "$MEDIAMTX_LOG"
         else
             echo "No mediamtx log found"
         fi

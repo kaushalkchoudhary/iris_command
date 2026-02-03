@@ -12,7 +12,7 @@ from ultralytics import YOLO
 import supervision as sv
 
 from helpers import (
-    FrameCapture, BboxSmoother, raw_loader_worker,
+    create_capture, FrameCapture, BboxSmoother, raw_loader_worker,
     INFERENCE_SIZE, SKIP_FRAMES, JPEG_QUALITY, MAX_DET,
     BBOX_SMOOTH_ALPHA, YOLO_GPU_MEMORY_FRACTION,
 )
@@ -583,7 +583,7 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
 
     # 1. Connect to RTSP immediately and start pushing raw frames
-    cap = FrameCapture(url)
+    cap = create_capture(url)
     if not cap.isOpened():
         print(f"[!] Failed to open source: {name}")
         return

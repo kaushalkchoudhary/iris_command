@@ -2,8 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.jsx'
-
-const API_BASE_URL = import.meta.env.DEV ? '/api' : 'https://iriscmdapi.stagingbot.xyz/api';
+import { API_BASE_URL } from './config'
 
 const installFrontendLogger = () => {
   const sendLog = (level, args, context = {}) => {

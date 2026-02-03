@@ -2,10 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { AlertTriangle, AlertCircle, XCircle, X, Clock, Activity, Users, Gauge, Search, Square, Play, Loader2, Crosshair, ScanSearch, BarChart3, Car, Truck, GitBranch, ShieldAlert, Flame, ArrowUpRight, ArrowDownRight, Minus, Radio, Siren, Ban, Wrench, Navigation, MapPin, SlidersHorizontal, TrendingUp, TrendingDown, Shield, Zap, Eye } from 'lucide-react';
 import clsx from 'clsx';
-
-const API_BASE_URL = import.meta.env.DEV
-  ? '/api'
-  : 'https://iriscmdapi.stagingbot.xyz/api';
+import { API_BASE_URL } from '../../config';
 
 /* ============================
    CONFIDENCE CONTROL COMPONENT
@@ -106,6 +103,95 @@ const ConfidenceControl = ({ selectedVideos = [], accentColor = 'cyan' }) => {
       {isUpdating && (
         <div className="text-[8px] text-white/30 text-center animate-pulse">Updating...</div>
       )}
+    </div>
+  );
+};
+
+/* ============================
+   OVERLAY TOGGLES
+============================ */
+const OverlayToggles = ({ selectedVideos = [], accentColor = 'cyan' }) => {
+  const [overlay, setOverlay] = useState({
+    heatmap: true,
+    heatmap_full: true,
+    bboxes: true,
+  });
+  const [isUpdating, setIsUpdating] = useState(false);
+
+  useEffect(() => {
+    if (selectedVideos.length === 0) return;
+    const fetchOverlay = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/overlays/${selectedVideos[0].id}`);
+        if (res.ok) {
+          const data = await res.json();
+          setOverlay({
+            heatmap: data.heatmap ?? true,
+            heatmap_full: data.heatmap_full ?? true,
+            bboxes: data.bboxes ?? true,
+          });
+        }
+      } catch (e) {}
+    };
+    fetchOverlay();
+  }, [selectedVideos]);
+
+  const updateOverlay = useCallback(async (key, value) => {
+    setIsUpdating(true);
+    try {
+      await Promise.all(
+        selectedVideos.map(v =>
+          fetch(`${API_BASE_URL}/overlays/${v.id}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ [key]: value }),
+          })
+        )
+      );
+    } catch (e) {
+      console.error('Failed to update overlay:', e);
+    }
+    setIsUpdating(false);
+  }, [selectedVideos]);
+
+  const toggle = (key) => {
+    const next = !overlay[key];
+    setOverlay(prev => ({ ...prev, [key]: next }));
+    updateOverlay(key, next);
+  };
+
+  if (selectedVideos.length === 0) return null;
+
+  return (
+    <div className="bg-black/40 border border-white/10 p-3">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <SlidersHorizontal className={`w-3.5 h-3.5 text-${accentColor}-400/80`} />
+          <div className={`text-[9px] text-${accentColor}-400/80 uppercase tracking-widest font-bold`}>Overlays</div>
+        </div>
+        {isUpdating && <Loader2 className="w-3 h-3 text-white/40 animate-spin" />}
+      </div>
+      <div className="grid grid-cols-3 gap-1.5">
+        {[
+          { key: 'heatmap', label: 'Heatmap' },
+          { key: 'heatmap_full', label: 'Full' },
+          { key: 'bboxes', label: 'Vehicles' },
+        ].map(t => (
+          <button
+            key={t.key}
+            onClick={() => toggle(t.key)}
+            className={clsx(
+              'px-2 py-1 border text-[8px] font-bold uppercase tracking-wider transition-all',
+              overlay[t.key]
+                ? `bg-${accentColor}-500/20 border-${accentColor}-500/40 text-${accentColor}-300`
+                : 'bg-white/5 border-white/10 text-white/40 hover:text-white/60'
+            )}
+            title={`Toggle ${t.label}`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
     </div>
   );
 };
@@ -1144,6 +1230,7 @@ const CrowdPanel = ({ selectedVideos = [] }) => {
 
           {/* Confidence Control */}
           <ConfidenceControl selectedVideos={selectedVideos} accentColor="teal" />
+          <OverlayToggles selectedVideos={selectedVideos} accentColor="teal" />
 
           {/* Primary Stats 2x2 Grid */}
           <div className="grid grid-cols-2 gap-2">
@@ -1466,6 +1553,7 @@ const CongestionPanel = ({ selectedVideos = [], alerts = [], onSelectAlert }) =>
 
           {/* Confidence Control */}
           <ConfidenceControl selectedVideos={selectedVideos} accentColor="cyan" />
+          <OverlayToggles selectedVideos={selectedVideos} accentColor="red" />
 
           {/* Severity summary cards */}
           <div className="grid grid-cols-3 gap-1.5">

@@ -1,8 +1,7 @@
 import React, { useState } from 'react';
 import { motion } from 'framer-motion';
 import { Shield, Lock, User, ChevronRight } from 'lucide-react';
-
-const API_BASE_URL = '/api';
+import { API_BASE_URL } from './config';
 
 const Login = ({ onLogin }) => {
   const [username, setUsername] = useState('');

@@ -62,5 +62,5 @@ paths:
     sourceOnDemand: yes
 
   # Accept any published stream (processed_* from backend inference)
-  all:
+  all_others:
     source: publisher

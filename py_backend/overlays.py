@@ -318,8 +318,15 @@ class FullHeatmapRenderer:
     def render(self, frame):
         if self.accumulator is None:
             return
+        if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+            return
+
+        if frame.dtype == object or not np.issubdtype(frame.dtype, np.number):
+            return
 
         h, w = frame.shape[:2]
+        if h == 0 or w == 0:
+            return
         acc = self.accumulator
 
         if acc.max() > 0:
@@ -337,7 +344,11 @@ class FullHeatmapRenderer:
         heatmap = cv2.applyColorMap((blur * 255).astype(np.uint8), cv2.COLORMAP_JET)
 
         heatmap_full = cv2.resize(heatmap, (w, h), interpolation=cv2.INTER_LINEAR)
+        if heatmap_full is None:
+            return
         mask = cv2.resize(blur, (w, h), interpolation=cv2.INTER_LINEAR) > 0.05
+        if mask is None or not mask.any():
+            return
 
         frame[mask] = cv2.addWeighted(frame[mask], 0.55, heatmap_full[mask], 0.45, 0)
 

@@ -23,6 +23,14 @@ def new_log_path(prefix: str, now: datetime | None = None) -> Path:
     return _daily_log_dir(now) / f"{prefix}-{ts}-{pid}.log"
 
 
+def env_log_path(prefix: str) -> Path | None:
+    key = f"IRIS_{prefix.upper()}_LOG_PATH"
+    override = os.environ.get(key)
+    if override:
+        return Path(override)
+    return None
+
+
 def setup_process_logging(prefix: str) -> Path:
     """Redirect stdout/stderr to a timestamped log file under logs/YYYY-MM-DD/."""
     global _LOG_FILE_HANDLE

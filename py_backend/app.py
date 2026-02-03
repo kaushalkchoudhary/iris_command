@@ -32,7 +32,7 @@ def relay_worker(stop_event, f_q, m_q, a_q, rf_q):
     """Relay metrics, frames, raw frames, and alerts from multiprocess queues to control server."""
     while not stop_event.is_set():
         try:
-            for _ in range(30):
+            for _ in range(60):
                 if f_q.empty():
                     break
                 name, data = f_q.get_nowait()
@@ -42,7 +42,7 @@ def relay_worker(stop_event, f_q, m_q, a_q, rf_q):
 
         # Relay raw frames for SAM
         try:
-            for _ in range(30):
+            for _ in range(60):
                 if rf_q.empty():
                     break
                 name, data = rf_q.get_nowait()
@@ -113,8 +113,8 @@ def main():
 
     manager = ctx.Manager()
     overlay_shared_dict = manager.dict()
-    frame_queue = ctx.Queue(maxsize=15)
-    raw_frame_queue = ctx.Queue(maxsize=15)
+    frame_queue = ctx.Queue(maxsize=60)
+    raw_frame_queue = ctx.Queue(maxsize=30)
     metrics_queue = ctx.Queue(maxsize=10)
     alert_queue = ctx.Queue(maxsize=10)
 

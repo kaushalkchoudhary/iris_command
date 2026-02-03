@@ -1,10 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import clsx from 'clsx';
 import { Activity, Globe, Upload } from 'lucide-react';
-
-const API_BASE_URL = import.meta.env.DEV
-  ? '/api'
-  : 'https://iriscmdapi.stagingbot.xyz/api';
+import { API_BASE_URL } from '../../config';
 
 const DRONE_REGION_MAP = {
   bcpdrone1: 'MG Road Junction',
@@ -21,7 +18,7 @@ const DRONE_REGION_MAP = {
   bcpdrone12: 'JP Nagar Phase 6',
 };
 
-const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
+const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh, useCase }) => {
   /* ── METRICS ── */
   const [fps, setFps] = useState(null);
 
@@ -81,7 +78,7 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
         await fetch(`${API_BASE_URL}/sources/start`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ index: video.droneIndex }),
+          body: JSON.stringify({ index: video.droneIndex, mode: useCase }),
         });
       } catch (e) { /* silent */ }
     }
@@ -118,6 +115,9 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh }) => {
 
     const formData = new FormData();
     formData.append('file', file);
+    if (useCase) {
+      formData.append('mode', useCase);
+    }
 
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${API_BASE_URL}/upload`);

@@ -8,10 +8,7 @@ import Footer from './components/Dashboard/Footer';
 import IRISLoader from './components/Dashboard/IRISLoader';
 import WelcomeScreen from './components/Dashboard/WelcomeScreen';
 import Login from './Login';
-
-const API_BASE_URL = import.meta.env.DEV ? '/api' : 'https://iriscmdapi.stagingbot.xyz/api';
-const WEBRTC_BASE = import.meta.env.DEV ? `http://${window.location.hostname}:8889` : 'https://mediamtx1.stagingbot.xyz';
-const HLS_BASE = import.meta.env.DEV ? `http://${window.location.hostname}:8888` : 'https://hls.stagingbot.xyz';
+import { API_BASE_URL, WEBRTC_BASE, HLS_BASE } from './config';
 
 // ── MODE CONFIGURATION ──
 // Overlays are hardcoded in the backend per mode. Frontend only knows theme.
@@ -36,7 +33,7 @@ const MODE_CONFIG = {
   },
 };
 
-export { MODE_CONFIG, API_BASE_URL, WEBRTC_BASE, HLS_BASE };
+export { MODE_CONFIG };
 
 // Stop all processing on the backend
 const stopAllProcessing = async () => {
@@ -313,7 +310,7 @@ const MetricsHUD = ({ metrics, useCase, samResult }) => {
 // WebRTC WHEP player — connects to MediaMTX for RTSP streams
 // WebRTC WHEP hook — used for raw RTSP feeds from MediaMTX (instant, low-latency)
 const useWebRTC = (streamName, enabled = true, options = {}) => {
-  const { initialDelayMs = 0, retryDelayMs = 3000 } = options;
+  const { initialDelayMs = 0, retryDelayMs = 3000, readyUrl = null } = options;
   const videoRef = useRef(null);
   const pcRef = useRef(null);
   const [connected, setConnected] = useState(false);
@@ -325,8 +322,31 @@ const useWebRTC = (streamName, enabled = true, options = {}) => {
     let retryTimer = null;
     let startTimer = null;
 
+    const waitForReady = async () => {
+      if (!readyUrl) return true;
+      const deadline = Date.now() + 15000;
+      while (!cancelled && Date.now() < deadline) {
+        try {
+          const res = await fetch(readyUrl);
+          if (res.ok) {
+            const data = await res.json();
+            if (data.ready) return true;
+          }
+        } catch (e) {}
+        await new Promise(r => setTimeout(r, 800));
+      }
+      return false;
+    };
+
     const connect = async () => {
       if (cancelled) return;
+      if (readyUrl) {
+        const ok = await waitForReady();
+        if (!ok || cancelled) {
+          retryTimer = setTimeout(connect, retryDelayMs);
+          return;
+        }
+      }
 
       const pc = new RTCPeerConnection({ iceServers: [] });
       pcRef.current = pc;
@@ -411,7 +431,11 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
   const { videoRef: processedVideoRef, connected: processedConnected } = useWebRTC(
     processedStreamName,
     isUpload || !isForensics,  // Uploads always use processed; non-forensics drones too
-    { initialDelayMs: 4000, retryDelayMs: 3000 }
+    {
+      initialDelayMs: 2000,
+      retryDelayMs: 3000,
+      readyUrl: `${API_BASE_URL}/processed/${video.id}/ready`,
+    }
   );
 
   // Hide loader once video is rendering — brief delay to show "FEED LOCKED" state
@@ -754,7 +778,7 @@ const Dashboard = ({ onLogout }) => {
         <RightPanel useCase={useCase} sources={allVideos} selectedVideos={selectedVideos} />
       </div>
 
-      <Footer selectedVideos={selectedVideos} onVideosChange={setSelectedVideos} videos={allVideos} />
+      <Footer selectedVideos={selectedVideos} onVideosChange={setSelectedVideos} videos={allVideos} useCase={useCase} />
     </motion.div>
   );
 }
@@ -776,16 +800,26 @@ const AppContents = () => {
     setIsAuthenticated(false);
   };
 
-  if (!isAuthenticated) {
-    return <Login onLogin={handleLogin} />;
-  }
-
   return (
     <div className="relative w-screen h-screen bg-[#050a14] overflow-hidden selection:bg-cyan-500/30 font-mono flex">
       <AnimatePresence mode="wait">
         <Routes location={location} key={location.pathname}>
-          <Route path="/" element={<WelcomeScreen key="welcome" />} />
-          <Route path="/:useCase" element={<Dashboard key="dashboard" onLogout={handleLogout} />} />
+          <Route
+            path="/"
+            element={
+              isAuthenticated
+                ? <WelcomeScreen key="welcome" />
+                : <Login onLogin={handleLogin} />
+            }
+          />
+          <Route
+            path="/:useCase"
+            element={
+              isAuthenticated
+                ? <Dashboard key="dashboard" onLogout={handleLogout} />
+                : <Navigate to="/" replace />
+            }
+          />
         </Routes>
       </AnimatePresence>
     </div>

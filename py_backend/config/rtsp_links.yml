@@ -1,54 +1,18 @@
 overlays:
-  bcpdrone2:
-    bboxes: false
-    confidence: 0.1
-    heatmap: true
-    trails: false
-  bcpdrone3:
-    bboxes: false
-    confidence: 0.2
-    heatmap: true
-    trails: false
   bcpdrone4:
+    heatmap: true
+    heatmap_full: false
+    heatmap_trails: true
+    trails: false
     bboxes: true
-    heatmap: false
-    trails: true
+    confidence: 0.15
   bcpdrone5:
-    bboxes: false
     heatmap: true
+    heatmap_full: false
+    heatmap_trails: true
     trails: false
-  bcpdrone6:
     bboxes: true
-    heatmap: true
-    trails: true
-  bcpdrone7:
-    bboxes: true
-    heatmap: false
-    trails: false
-  bcpdrone8:
-    bboxes: false
-    confidence: 0.05
-    heatmap: true
-    trails: false
-  bcpdrone9:
-    bboxes: true
-    confidence: 0.1
-    heatmap: false
-    trails: false
-  bcpdrone10:
-    heatmap: true
-    trails: false
-    bboxes: false
-    confidence: 0.1
-  bcpdrone11:
-    bboxes: true
-    heatmap: true
-    trails: true
-  bcpdrone12:
-    heatmap: false
-    trails: false
-    bboxes: false
-    confidence: 0.1
+    confidence: 0.15
 rtsp_links:
 - rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone1
 - rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone2
