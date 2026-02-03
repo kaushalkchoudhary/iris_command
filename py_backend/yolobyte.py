@@ -872,6 +872,13 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
                 trail_renderer.render(out, current_ids)
 
             if overlay.get("bboxes", True) and tracked is not None and tracked.tracker_id is not None and bbox_smoother:
+                _SPEED_LABELS = {0: "STALLED", 1: "SLOW", 2: "MEDIUM", 3: "FAST"}
+                _SPEED_COLORS = {
+                    0: (0, 0, 220),      # red
+                    1: (0, 165, 255),     # amber/orange
+                    2: (0, 210, 130),     # green
+                    3: (210, 180, 0),     # cyan-ish
+                }
                 smoothed_xyxy = bbox_smoother.smooth(tracked)
                 tids = tracked.tracker_id
                 class_ids = tracked.class_id
@@ -880,29 +887,20 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
                     x1, y1, x2, y2 = map(int, smoothed_xyxy[i])
                     tid = tids[i]
 
-                    cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 255), 1)
+                    # Determine speed band for this vehicle
+                    pos = analytics.track_positions.get(tid)
+                    spd_px = pos[2] if pos else 0.0
+                    spd_cls = classify_speed(spd_px)
+                    spd_label = _SPEED_LABELS[spd_cls]
+                    spd_color = _SPEED_COLORS[spd_cls]
 
-                    cls_name = CLASS_NAMES.get(int(class_ids[i]), "") if class_ids is not None else ""
-                    label = f"#{tid}"
-                    if cls_name:
-                        label += f" {cls_name}"
+                    # Bbox: color matches speed
+                    cv2.rectangle(out, (x1, y1), (x2, y2), spd_color, 1)
 
+                    # Label: speed band
+                    label = spd_label
                     ly = y1 - 4 if y1 > 15 else y2 + 12
                     cv2.putText(out, label, (x1, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
-
-                    v_state = analytics.track_state.get(tid, "moving")
-                    v_impact = analytics.track_impact_score.get(tid, 0.0)
-                    if v_state == "abnormal":
-                        tag_color = (0, 0, 255)
-                        tag_text = f"#{tid} ABNORMAL"
-                    elif v_impact > 5.0:
-                        tag_color = (0, 165, 255)
-                        tag_text = f"#{tid} HIGH-IMPACT"
-                    else:
-                        tag_color = (0, 200, 0)
-                        tag_text = f"#{tid} NORMAL"
-                    tag_y = y1 - 16 if y1 > 30 else y2 + 24
-                    cv2.putText(out, tag_text, (x1, tag_y), cv2.FONT_HERSHEY_SIMPLEX, 0.3, tag_color, 1, cv2.LINE_AA)
             elif bbox_smoother:
                 bbox_smoother.smooth(tracked)
 

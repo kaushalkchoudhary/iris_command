@@ -110,7 +110,7 @@ const ConfidenceControl = ({ selectedVideos = [], accentColor = 'cyan' }) => {
 /* ============================
    OVERLAY TOGGLES
 ============================ */
-const OverlayToggles = ({ selectedVideos = [], accentColor = 'cyan' }) => {
+const OverlayToggles = ({ selectedVideos = [], accentColor = 'cyan', useCase = '' }) => {
   const [overlay, setOverlay] = useState({
     heatmap: true,
     heatmap_full: true,
@@ -162,6 +162,18 @@ const OverlayToggles = ({ selectedVideos = [], accentColor = 'cyan' }) => {
 
   if (selectedVideos.length === 0) return null;
 
+  const isCrowd = useCase === 'crowd';
+  const toggleItems = isCrowd
+    ? [
+        { key: 'heatmap', label: 'Heatmap' },
+        { key: 'heatmap_full', label: 'Full' },
+      ]
+    : [
+        { key: 'heatmap', label: 'Heatmap' },
+        { key: 'heatmap_full', label: 'Full' },
+        { key: 'bboxes', label: 'Vehicles' },
+      ];
+
   return (
     <div className="bg-black/40 border border-white/10 p-3">
       <div className="flex items-center justify-between mb-2">
@@ -171,12 +183,8 @@ const OverlayToggles = ({ selectedVideos = [], accentColor = 'cyan' }) => {
         </div>
         {isUpdating && <Loader2 className="w-3 h-3 text-white/40 animate-spin" />}
       </div>
-      <div className="grid grid-cols-3 gap-1.5">
-        {[
-          { key: 'heatmap', label: 'Heatmap' },
-          { key: 'heatmap_full', label: 'Full' },
-          { key: 'bboxes', label: 'Vehicles' },
-        ].map(t => (
+      <div className={`grid gap-1.5 ${isCrowd ? 'grid-cols-2' : 'grid-cols-3'}`}>
+        {toggleItems.map(t => (
           <button
             key={t.key}
             onClick={() => toggle(t.key)}
@@ -1230,7 +1238,7 @@ const CrowdPanel = ({ selectedVideos = [] }) => {
 
           {/* Confidence Control */}
           <ConfidenceControl selectedVideos={selectedVideos} accentColor="teal" />
-          <OverlayToggles selectedVideos={selectedVideos} accentColor="teal" />
+          <OverlayToggles selectedVideos={selectedVideos} accentColor="teal" useCase="crowd" />
 
           {/* Primary Stats 2x2 Grid */}
           <div className="grid grid-cols-2 gap-2">
