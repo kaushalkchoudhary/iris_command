@@ -662,15 +662,14 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
         conf_thresh = 0.15
         tracker = sv.ByteTrack(
             frame_rate=int(src_fps),
-            track_activation_threshold=0.2,
-            lost_track_buffer=45,
-            minimum_matching_threshold=0.75,
-            minimum_consecutive_frames=3,
+            track_activation_threshold=0.35,
+            lost_track_buffer=30,
+            minimum_matching_threshold=0.8,
+            minimum_consecutive_frames=4,
         )
-        trail_renderer = TrailRenderer(max_len=20)
-        heatmap_renderer = HeatmapRenderer(max_len=12)
-        full_heatmap_renderer = FullHeatmapRenderer()
-        full_heatmap_renderer = FullHeatmapRenderer()
+        trail_renderer = TrailRenderer(max_len=15)
+        heatmap_renderer = HeatmapRenderer(max_len=8)
+        full_heatmap_renderer = FullHeatmapRenderer(decay=0.90)
         bbox_smoother = BboxSmoother(alpha=BBOX_SMOOTH_ALPHA)
         crowd_analytics = None
         analytics = AnalyticsState(w, h, src_fps, CLASS_NAMES)
@@ -1021,16 +1020,17 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
 
         target_classes = [3, 4, 5, 7, 8, 9]
         CLASS_NAMES = {3: "car", 4: "van", 5: "truck", 7: "bus", 8: "motor", 9: "bicycle"}
-        conf_thresh = 0.15
+        conf_thresh = 0.25
         tracker = sv.ByteTrack(
             frame_rate=int(src_fps),
-            track_activation_threshold=0.2,
-            lost_track_buffer=45,
-            minimum_matching_threshold=0.75,
-            minimum_consecutive_frames=3,
+            track_activation_threshold=0.35,
+            lost_track_buffer=30,
+            minimum_matching_threshold=0.8,
+            minimum_consecutive_frames=4,
         )
-        trail_renderer = TrailRenderer(max_len=20)
-        heatmap_renderer = HeatmapRenderer(max_len=12)
+        trail_renderer = TrailRenderer(max_len=15)
+        heatmap_renderer = HeatmapRenderer(max_len=8)
+        full_heatmap_renderer = FullHeatmapRenderer(decay=0.90)
         bbox_smoother = BboxSmoother(alpha=BBOX_SMOOTH_ALPHA)
         crowd_analytics = None
         analytics = AnalyticsState(w, h, src_fps, CLASS_NAMES)
@@ -1060,9 +1060,9 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             if not use_ccn:
                 tracker = sv.ByteTrack(frame_rate=int(src_fps))
-                trail_renderer = TrailRenderer(max_len=20)
-            heatmap_renderer = HeatmapRenderer(max_len=12)
-            full_heatmap_renderer = FullHeatmapRenderer()
+                trail_renderer = TrailRenderer(max_len=15)
+            heatmap_renderer = HeatmapRenderer(max_len=8)
+            full_heatmap_renderer = FullHeatmapRenderer(decay=0.90)
             continue
 
         out = frame.copy()

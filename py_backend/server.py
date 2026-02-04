@@ -157,7 +157,7 @@ active_mode: Optional[str] = None
 
 # Fixed overlay config per mode
 MODE_OVERLAYS = {
-    "congestion": {"heatmap": True, "heatmap_full": True, "heatmap_trails": True, "trails": False, "bboxes": True, "bbox_label": "class"},
+    "congestion": {"heatmap": True, "heatmap_full": True, "heatmap_trails": True, "trails": False, "bboxes": False},
     "vehicle":    {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": True, "bbox_label": "class"},
     "flow":       {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": True,  "bboxes": True, "bbox_label": "speed"},
     "forensics":  {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": False, "bbox_label": "class"},
@@ -165,10 +165,10 @@ MODE_OVERLAYS = {
 }
 
 MODE_CONFIDENCE = {
-    "congestion": 0.15,
-    "vehicle":    0.20,
-    "flow":       0.15,
-    "forensics":  0.15,
+    "congestion": 0.30,
+    "vehicle":    0.25,
+    "flow":       0.20,
+    "forensics":  0.20,
     "crowd":      0.25,
 }
 

@@ -235,11 +235,8 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh, useCas
             <div className="w-px h-3 sm:h-4 bg-white/10 mx-0.5 shrink-0" />
           )}
 
-          {uploadedVideos.map((upload) => {
-            const label = (upload.original_name || upload.name)
-              .replace(/\.[^/.]+$/, '')
-              .toUpperCase()
-              .slice(0, 8);
+          {uploadedVideos.map((upload, idx) => {
+            const label = `UP${idx + 1} ↑`;
             const isActive = selectedVideos.some(v => v.id === upload.name);
             return (
               <button

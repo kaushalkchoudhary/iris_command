@@ -18,7 +18,7 @@
 # Don't use set -e as pkill returns non-zero when no process found
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$SCRIPT_DIR/.."
+PROJECT_DIR="$SCRIPT_DIR"
 LOG_ROOT="$PROJECT_DIR/logs"
 LOG_DIR="$LOG_ROOT"
 DATA_DIR="$SCRIPT_DIR/data"
@@ -28,6 +28,8 @@ mkdir -p "$LOG_DIR"
 MEDIAMTX_LOG="$LOG_DIR/mediamtx.log"
 BACKEND_LOG="$LOG_DIR/backend.log"
 FRONTEND_LOG="$LOG_DIR/frontend.log"
+MEDIAMTX_PID_FILE="$LOG_DIR/mediamtx.pid"
+BACKEND_PID_FILE="$LOG_DIR/inference.pid"
 
 # Colors for output
 RED='\033[0;31m'
@@ -47,20 +49,94 @@ error() {
     echo -e "${RED}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $1"
 }
 
+is_pid_running() {
+    local pid="$1"
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+backend_pids() {
+    local pid cwd
+    while read -r pid; do
+        [ -z "$pid" ] && continue
+        cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+        if [ "$cwd" = "$SCRIPT_DIR" ]; then
+            echo "$pid"
+        fi
+    done < <(pgrep -f "python.*(app|inference)\.py" 2>/dev/null || true)
+}
+
+mediamtx_pids() {
+    pgrep -f "mediamtx.*$CONFIG_DIR/mediamtx.yml" 2>/dev/null || true
+}
+
+ffmpeg_pids() {
+    pgrep -f "ffmpeg.*processed_" 2>/dev/null || true
+}
+
+cleanup_leftovers() {
+    for pid_file in "$MEDIAMTX_PID_FILE" "$BACKEND_PID_FILE"; do
+        if [ -f "$pid_file" ]; then
+            local pid
+            pid="$(cat "$pid_file" 2>/dev/null || true)"
+            if ! is_pid_running "$pid"; then
+                rm -f "$pid_file"
+            fi
+        fi
+    done
+}
+
+kill_pids_gracefully() {
+    local label="$1"
+    shift
+    local pids=("$@")
+    local pid alive attempts
+
+    if [ "${#pids[@]}" -eq 0 ]; then
+        return 0
+    fi
+
+    log "Stopping $label PID(s): ${pids[*]}"
+    kill "${pids[@]}" 2>/dev/null || true
+
+    attempts=0
+    while [ "$attempts" -lt 20 ]; do
+        alive=0
+        for pid in "${pids[@]}"; do
+            if is_pid_running "$pid"; then
+                alive=1
+                break
+            fi
+        done
+        [ "$alive" -eq 0 ] && return 0
+        sleep 0.5
+        attempts=$((attempts + 1))
+    done
+
+    warn "$label did not stop with SIGTERM, forcing SIGKILL"
+    kill -9 "${pids[@]}" 2>/dev/null || true
+}
+
+is_fully_started() {
+    local backend_pid mediamtx_pid
+    backend_pid="$(backend_pids | head -1)"
+    mediamtx_pid="$(mediamtx_pids | head -1)"
+    [ -n "$backend_pid" ] && [ -n "$mediamtx_pid" ]
+}
+
 stop_services() {
+    cleanup_leftovers
     log "Stopping existing services..."
 
-    # Stop app.py (and legacy inference.py)
-    pkill -f "python.*app\.py" 2>/dev/null || true
-    pkill -f "python.*inference\.py" 2>/dev/null || true
+    mapfile -t ffmpeg_list < <(ffmpeg_pids)
+    mapfile -t backend_list < <(backend_pids)
+    mapfile -t mediamtx_list < <(mediamtx_pids)
 
-    # Stop mediamtx
-    pkill -f "mediamtx" 2>/dev/null || true
+    kill_pids_gracefully "FFmpeg publishers" "${ffmpeg_list[@]}"
+    kill_pids_gracefully "backend" "${backend_list[@]}"
+    kill_pids_gracefully "MediaMTX" "${mediamtx_list[@]}"
 
-    # Stop any ffmpeg publishers
-    pkill -f "ffmpeg.*processed_" 2>/dev/null || true
-
-    sleep 2
+    rm -f "$MEDIAMTX_PID_FILE" "$BACKEND_PID_FILE"
+    cleanup_leftovers
     log "Services stopped"
 }
 
@@ -83,7 +159,7 @@ start_mediamtx() {
     cd "$SCRIPT_DIR"
     $MEDIAMTX_BIN "$CONFIG_DIR/mediamtx.yml" >> "$MEDIAMTX_LOG" 2>&1 &
     MEDIAMTX_PID=$!
-    echo $MEDIAMTX_PID > "$LOG_DIR/mediamtx.pid"
+    echo "$MEDIAMTX_PID" > "$MEDIAMTX_PID_FILE"
 
     # Wait for mediamtx to start
     sleep 2
@@ -118,7 +194,7 @@ start_inference() {
     "$PYTHON_BIN" -u app.py >> "$BACKEND_LOG" 2>&1 &
 
     INFERENCE_PID=$!
-    echo $INFERENCE_PID > "$LOG_DIR/inference.pid"
+    echo "$INFERENCE_PID" > "$BACKEND_PID_FILE"
 
     # Wait briefly and check if it started
     sleep 3
@@ -137,23 +213,23 @@ status() {
     echo "──────────────────────────────────────"
 
     # Check mediamtx
-    if pgrep -f "mediamtx" > /dev/null; then
-        MPID=$(pgrep -f "mediamtx" | head -1)
+    MPID="$(mediamtx_pids | head -1)"
+    if [ -n "$MPID" ]; then
         echo -e "  MediaMTX:   ${GREEN}Running${NC} (PID: $MPID)"
     else
         echo -e "  MediaMTX:   ${RED}Stopped${NC}"
     fi
 
     # Check app.py
-    if pgrep -f "python.*app\.py" > /dev/null; then
-        IPID=$(pgrep -f "python.*app\.py" | head -1)
+    IPID="$(backend_pids | head -1)"
+    if [ -n "$IPID" ]; then
         echo -e "  Backend:    ${GREEN}Running${NC} (PID: $IPID)"
     else
         echo -e "  Backend:    ${RED}Stopped${NC}"
     fi
 
     # Check FFmpeg publishers
-    FFMPEG_COUNT=$(pgrep -f "ffmpeg.*processed_" | wc -l)
+    FFMPEG_COUNT="$(ffmpeg_pids | wc -l)"
     if [ "$FFMPEG_COUNT" -gt 0 ]; then
         echo -e "  FFmpeg:     ${GREEN}$FFMPEG_COUNT publisher(s) active${NC}"
     else
@@ -166,7 +242,18 @@ status() {
 
 case "$1" in
     start)
-        stop_services
+        cleanup_leftovers
+        if is_fully_started; then
+            MPID="$(mediamtx_pids | head -1)"
+            IPID="$(backend_pids | head -1)"
+            warn "Already started (MediaMTX PID: $MPID, Backend PID: $IPID)"
+            status
+            exit 0
+        fi
+        if [ -n "$(backend_pids | head -1)" ] || [ -n "$(mediamtx_pids | head -1)" ]; then
+            warn "Detected partially running services; cleaning up before start"
+            stop_services
+        fi
         start_mediamtx
         start_inference
         status

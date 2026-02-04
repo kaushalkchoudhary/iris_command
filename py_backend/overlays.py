@@ -163,7 +163,7 @@ class HeatmapRenderer:
         self.max_len = max_len
 
     def update(self, tracked_detections):
-        """Update heat trails - grounded at bottom of bbox (road level)."""
+        """Update heat trails - centered on vehicle."""
         current_ids = set()
 
         if tracked_detections is not None and tracked_detections.tracker_id is not None:
@@ -175,12 +175,12 @@ class HeatmapRenderer:
                 tid = tids[i]
                 current_ids.add(tid)
 
-                # GROUNDED: bottom-center of bbox (where wheels touch road)
+                # CENTERED: center of bbox for better visual
                 gx = int((x1 + x2) * 0.5)
-                gy = int(y2)  # Bottom edge - on the road
+                gy = int((y1 + y2) * 0.5)
 
-                # Thin radius for the heat trail
-                r = int(min(x2 - x1, y2 - y1) * 0.25)
+                # Radius based on vehicle size
+                r = int(min(x2 - x1, y2 - y1) * 0.3)
 
                 if tid not in self.heat_trails:
                     self.heat_trails[tid] = []
@@ -277,9 +277,9 @@ class HeatmapRenderer:
 
 
 class FullHeatmapRenderer:
-    """Renders a full-scene heatmap from vehicle ground contact points."""
+    """Renders a full-scene heatmap from vehicle center points."""
 
-    def __init__(self, scale=0.5, decay=0.94, blur=21):
+    def __init__(self, scale=0.5, decay=0.92, blur=15):
         self.scale = scale
         self.decay = decay
         self.blur = blur if blur % 2 == 1 else blur + 1
@@ -304,13 +304,14 @@ class FullHeatmapRenderer:
 
         for i in range(len(tids)):
             x1, y1, x2, y2 = xyxys[i]
+            # CENTERED: center of bbox for better visualization
             gx = int((x1 + x2) * 0.5)
-            gy = int(y2)
-            r = int(max(6, min(x2 - x1, y2 - y1) * 0.35))
+            gy = int((y1 + y2) * 0.5)
+            r = int(max(6, min(x2 - x1, y2 - y1) * 0.4))
 
             sx = int(gx * self.scale)
             sy = int(gy * self.scale)
-            sr = max(2, int(r * self.scale))
+            sr = max(3, int(r * self.scale))
 
             if 0 <= sx < self.accumulator.shape[1] and 0 <= sy < self.accumulator.shape[0]:
                 cv2.circle(self.accumulator, (sx, sy), sr, 1.0, -1)
@@ -350,6 +351,6 @@ class FullHeatmapRenderer:
         if mask is None or not mask.any():
             return
 
-        frame[mask] = cv2.addWeighted(frame[mask], 0.55, heatmap_full[mask], 0.45, 0)
+        frame[mask] = cv2.addWeighted(frame[mask], 0.4, heatmap_full[mask], 0.6, 0)
 
         self.accumulator *= self.decay
