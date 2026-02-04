@@ -669,7 +669,7 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
         )
         trail_renderer = TrailRenderer(max_len=15)
         heatmap_renderer = HeatmapRenderer(max_len=8)
-        full_heatmap_renderer = FullHeatmapRenderer(decay=0.90)
+        full_heatmap_renderer = FullHeatmapRenderer()
         bbox_smoother = BboxSmoother(alpha=BBOX_SMOOTH_ALPHA)
         crowd_analytics = None
         analytics = AnalyticsState(w, h, src_fps, CLASS_NAMES)
@@ -714,7 +714,7 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
             continue
 
         fps_times.append(frame_start)
-        if len(fps_times) > 30:
+        if len(fps_times) > 15:
             fps_times.pop(0)
         if len(fps_times) >= 2:
             elapsed = fps_times[-1] - fps_times[0]
@@ -1030,7 +1030,7 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
         )
         trail_renderer = TrailRenderer(max_len=15)
         heatmap_renderer = HeatmapRenderer(max_len=8)
-        full_heatmap_renderer = FullHeatmapRenderer(decay=0.90)
+        full_heatmap_renderer = FullHeatmapRenderer()
         bbox_smoother = BboxSmoother(alpha=BBOX_SMOOTH_ALPHA)
         crowd_analytics = None
         analytics = AnalyticsState(w, h, src_fps, CLASS_NAMES)
@@ -1062,13 +1062,13 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
                 tracker = sv.ByteTrack(frame_rate=int(src_fps))
                 trail_renderer = TrailRenderer(max_len=15)
             heatmap_renderer = HeatmapRenderer(max_len=8)
-            full_heatmap_renderer = FullHeatmapRenderer(decay=0.90)
+            full_heatmap_renderer = FullHeatmapRenderer()
             continue
 
         out = frame.copy()
 
         fps_times.append(frame_start)
-        if len(fps_times) > 30:
+        if len(fps_times) > 15:
             fps_times.pop(0)
         if len(fps_times) >= 2:
             elapsed = fps_times[-1] - fps_times[0]
@@ -1181,6 +1181,39 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
 
             if overlay.get("trails", True) and trail_renderer:
                 trail_renderer.render(out, current_ids)
+
+            # Render bounding boxes with labels
+            if overlay.get("bboxes", True) and tracked is not None and tracked.tracker_id is not None and bbox_smoother:
+                _SPEED_LABELS = {0: "STALLED", 1: "SLOW", 2: "MEDIUM", 3: "FAST"}
+                _SPEED_COLORS = {
+                    0: (0, 0, 220),      # red
+                    1: (0, 165, 255),    # amber/orange
+                    2: (0, 210, 130),    # green
+                    3: (210, 180, 0),    # cyan-ish
+                }
+                bbox_label_mode = overlay.get("bbox_label", "speed")
+                smoothed_xyxy = bbox_smoother.smooth(tracked)
+                tids = tracked.tracker_id
+
+                for i in range(len(tids)):
+                    tid = tids[i]
+                    x1, y1, x2, y2 = map(int, smoothed_xyxy[i])
+                    speed_cat = analytics.speed_categories.get(tid, 3) if analytics else 3
+                    cls_id = tracked.class_id[i] if tracked.class_id is not None and i < len(tracked.class_id) else None
+                    cls_name = CLASS_NAMES.get(cls_id, "?") if cls_id is not None else "?"
+
+                    if bbox_label_mode == "speed":
+                        label = _SPEED_LABELS.get(speed_cat, "?")
+                        box_color = _SPEED_COLORS.get(speed_cat, (200, 200, 200))
+                    else:
+                        label = cls_name.upper()
+                        box_color = (0, 255, 255)
+
+                    cv2.rectangle(out, (x1, y1), (x2, y2), box_color, 1)
+                    ly = y1 - 4 if y1 > 15 else y2 + 12
+                    cv2.putText(out, label, (x1, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
+            elif bbox_smoother:
+                bbox_smoother.smooth(tracked)
 
             # Compute and send metrics
             now = time.time()

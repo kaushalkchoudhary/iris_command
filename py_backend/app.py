@@ -8,14 +8,6 @@ import time
 import threading
 import multiprocessing as mp
 
-# CRITICAL: Set spawn method before any multiprocessing objects are created
-# This must happen before importing modules that use multiprocessing
-if __name__ == "__main__" or mp.current_process().name == "MainProcess":
-    try:
-        mp.set_start_method('spawn', force=True)
-    except RuntimeError:
-        pass  # Already set
-
 from log_utils import setup_process_logging
 from server import (
     run_control_server,
@@ -110,12 +102,16 @@ def main():
     global spawn_ctx, overlay_shared_dict, frame_queue, raw_frame_queue, metrics_queue, alert_queue
     setup_process_logging("backend")
 
-    # CUDA requires 'spawn' start method - cannot re-initialize CUDA in forked subprocess.
+    # CUDA requires non-fork start method to avoid "Cannot re-initialize CUDA in forked subprocess"
+    # Try forkserver first (works with CUDA, fewer SemLock issues), then spawn
     # Allow override via IRIS_MP_START_METHOD=spawn|fork|forkserver.
-    default_method = "spawn"
+    available = mp.get_all_start_methods()
+    default_method = "forkserver" if "forkserver" in available else "spawn"
     method = os.environ.get("IRIS_MP_START_METHOD", default_method)
-    if method not in mp.get_all_start_methods():
+    if method not in available:
         method = default_method
+
+    print(f"[MP] Using multiprocessing start method: {method}")
     ctx = mp.get_context(method)
     spawn_ctx = ctx
 

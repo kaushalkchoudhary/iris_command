@@ -1044,6 +1044,13 @@ def get_job(job_id: str):
 
 upload_sources_lock = threading.Lock()
 upload_sources: Dict[str, dict] = {}
+upload_name_counter = 0
+
+def _next_upload_name() -> str:
+    global upload_name_counter
+    with upload_sources_lock:
+        upload_name_counter += 1
+        return f"upload{upload_name_counter}"
 
 @app.post("/api/upload")
 async def upload_video(file: UploadFile = File(...), mode: Optional[str] = Form(None)):
@@ -1058,7 +1065,7 @@ async def upload_video(file: UploadFile = File(...), mode: Optional[str] = Form(
 
     job_id = uuid.uuid4().hex
     original_name = Path(file.filename).stem
-    name = f"upload_{original_name}_{job_id[:8]}"
+    name = _next_upload_name()
     ensure_overlay(name)
 
     target = UPLOAD_DIR / f"{job_id}_{file.filename}"

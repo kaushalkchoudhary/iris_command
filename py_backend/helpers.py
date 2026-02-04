@@ -16,12 +16,13 @@ os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
 INFERENCE_SIZE = 1280
 TARGET_FPS = 30
 SKIP_FRAMES = 1
-JPEG_QUALITY = 88
+JPEG_QUALITY = 80
 MAX_DET = 50
 BBOX_SMOOTH_ALPHA = 0.45
 
-# GPU memory budget: cap each YOLO process so SAM3 has room
-YOLO_GPU_MEMORY_FRACTION = 0.35
+# GPU memory budget: cap each YOLO process for multi-stream support
+# 0.20 allows ~4-5 streams to run simultaneously
+YOLO_GPU_MEMORY_FRACTION = 0.20
 
 GPU_DECODE_DEFAULT = os.environ.get("IRIS_GPU_DECODE", "1") == "1"
 

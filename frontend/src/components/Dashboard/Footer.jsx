@@ -18,6 +18,21 @@ const DRONE_REGION_MAP = {
   bcpdrone12: 'JP Nagar Phase 6',
 };
 
+const uploadNumber = (name = '') => {
+  const m = String(name).match(/^upload(\d+)$/i);
+  return m ? Number(m[1]) : null;
+};
+
+const uploadVideoLabel = (name = '') => {
+  const n = uploadNumber(name);
+  return n ? `UPLOAD ${n}` : 'UPLOAD';
+};
+
+const uploadChipLabel = (name = '') => {
+  const n = uploadNumber(name);
+  return n ? `UP${n} ↑` : 'UP ↑';
+};
+
 const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh, useCase }) => {
   /* ── METRICS ── */
   const [fps, setFps] = useState(null);
@@ -136,7 +151,7 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh, useCas
             id: response.name,
             type: 'upload',
             stream: response.name,
-            label: file.name.replace(/\.[^/.]+$/, '').toUpperCase().slice(0, 8),
+            label: uploadVideoLabel(response.name),
           };
           setUploadedVideos(prev => [...prev, { name: response.name, original_name: file.name }]);
           onVideosChange([...selectedVideos, newVideo]);
@@ -165,7 +180,7 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh, useCas
       id: upload.name,
       type: 'upload',
       stream: upload.name,
-      label: (upload.original_name || upload.name).replace(/\.[^/.]+$/, '').toUpperCase().slice(0, 8),
+      label: uploadVideoLabel(upload.name),
     };
     const active = selectedVideos.some(v => v.id === upload.name);
     if (active) {
@@ -235,8 +250,8 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh, useCas
             <div className="w-px h-3 sm:h-4 bg-white/10 mx-0.5 shrink-0" />
           )}
 
-          {uploadedVideos.map((upload, idx) => {
-            const label = `UP${idx + 1} ↑`;
+          {uploadedVideos.map((upload) => {
+            const label = uploadChipLabel(upload.name);
             const isActive = selectedVideos.some(v => v.id === upload.name);
             return (
               <button

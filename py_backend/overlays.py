@@ -277,9 +277,11 @@ class HeatmapRenderer:
 
 
 class FullHeatmapRenderer:
-    """Renders a full-scene heatmap from vehicle center points."""
+    """Renders a full-scene heatmap showing traffic density over time."""
 
-    def __init__(self, scale=0.5, decay=0.92, blur=15):
+    def __init__(self, scale=0.5, decay=0.97, blur=25):
+        # decay=0.97 means 3% decay per frame - slower accumulation for global view
+        # blur=25 for smoother, broader heat zones
         self.scale = scale
         self.decay = decay
         self.blur = blur if blur % 2 == 1 else blur + 1
