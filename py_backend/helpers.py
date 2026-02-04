@@ -20,9 +20,26 @@ JPEG_QUALITY = 80
 MAX_DET = 50
 BBOX_SMOOTH_ALPHA = 0.45
 
-# GPU memory budget: cap each YOLO process for multi-stream support
-# 0.20 allows ~4-5 streams to run simultaneously
+# GPU memory budget: base value, dynamically adjusted based on active streams
 YOLO_GPU_MEMORY_FRACTION = 0.20
+
+
+def get_dynamic_gpu_fraction(active_streams: int) -> float:
+    """Calculate GPU memory fraction based on number of active streams.
+
+    More streams = less GPU per stream to avoid OOM.
+    Fewer streams = more GPU for better performance.
+    """
+    if active_streams <= 1:
+        return 0.70  # Single stream gets most of GPU
+    elif active_streams == 2:
+        return 0.40  # 2 streams: 40% each
+    elif active_streams == 3:
+        return 0.30  # 3 streams: 30% each
+    elif active_streams <= 5:
+        return 0.20  # 4-5 streams: 20% each
+    else:
+        return 0.15  # 6+ streams: 15% each (may need to queue)
 
 GPU_DECODE_DEFAULT = os.environ.get("IRIS_GPU_DECODE", "1") == "1"
 

@@ -916,7 +916,12 @@ def start_source(req: SourceStartRequest):
         mode_confidence = MODE_CONFIDENCE.get(active_mode, 0.15)
         overlay_config = {**base_overlay, "confidence": mode_confidence}
 
-        process, stop = start_source_callback(req.index, url, name, overlay_config)
+        # Calculate total active streams (including this new one) for dynamic GPU allocation
+        with upload_sources_lock:
+            upload_count = len(upload_sources)
+        active_streams = len(running_sources) + upload_count + 1
+
+        process, stop = start_source_callback(req.index, url, name, overlay_config, active_streams)
         running_sources[req.index] = {"process": process, "stop": stop}
 
     with overlay_lock:
@@ -1085,7 +1090,13 @@ async def upload_video(file: UploadFile = File(...), mode: Optional[str] = Form(
     is_crowd_mode = active_mode == "crowd"
     print(f"[UPLOAD] {name} overlays from active_mode={active_mode}, is_crowd={is_crowd_mode}: {overlay_config}")
 
-    process, stop = start_upload_callback(str(target), name, overlay_config, is_crowd_mode)
+    # Calculate total active streams for dynamic GPU allocation
+    with upload_sources_lock:
+        upload_count = len(upload_sources)
+    active_streams = len(running_sources) + upload_count + 1
+
+    # realtime=False for max processing speed on uploads
+    process, stop = start_upload_callback(str(target), name, overlay_config, is_crowd_mode, active_streams, realtime=False)
 
     with upload_sources_lock:
         upload_sources[name] = {

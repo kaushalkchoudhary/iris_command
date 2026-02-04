@@ -72,26 +72,26 @@ def relay_worker(stop_event, f_q, m_q, a_q, rf_q):
         time.sleep(0.002)
 
 
-def start_backend(idx, url, name, overlay_config=None):
+def start_backend(idx, url, name, overlay_config=None, active_streams=1):
     """Spawn a new inference process for an RTSP source."""
     overlay_shared_dict[name] = overlay_config if overlay_config else get_overlay_state(name)
     stop = spawn_ctx.Event()
     p = spawn_ctx.Process(
         target=process_stream,
-        args=(idx, name, url, stop, frame_queue, metrics_queue, alert_queue, raw_frame_queue, overlay_shared_dict),
+        args=(idx, name, url, stop, frame_queue, metrics_queue, alert_queue, raw_frame_queue, overlay_shared_dict, active_streams),
         daemon=True,
     )
     p.start()
     return p, stop
 
 
-def start_upload_backend(file_path, name, overlay_config=None, is_crowd=False):
+def start_upload_backend(file_path, name, overlay_config=None, is_crowd=False, active_streams=1, realtime=False):
     """Start inference on an uploaded video file."""
     overlay_shared_dict[name] = overlay_config if overlay_config else get_overlay_state(name)
     stop = spawn_ctx.Event()
     p = spawn_ctx.Process(
         target=process_upload_stream,
-        args=(name, file_path, stop, frame_queue, metrics_queue, alert_queue, raw_frame_queue, overlay_shared_dict, is_crowd),
+        args=(name, file_path, stop, frame_queue, metrics_queue, alert_queue, raw_frame_queue, overlay_shared_dict, is_crowd, active_streams, realtime),
         daemon=True,
     )
     p.start()

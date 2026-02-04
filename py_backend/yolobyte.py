@@ -14,7 +14,7 @@ import supervision as sv
 from helpers import (
     create_capture, FrameCapture, BboxSmoother, raw_loader_worker,
     INFERENCE_SIZE, SKIP_FRAMES, JPEG_QUALITY, MAX_DET,
-    BBOX_SMOOTH_ALPHA, YOLO_GPU_MEMORY_FRACTION,
+    BBOX_SMOOTH_ALPHA, get_dynamic_gpu_fraction,
 )
 from overlays import TrailRenderer, HeatmapRenderer, CrowdHeatmapRenderer, FullHeatmapRenderer
 from crowd import CrowdAnalyticsState, CrowdCounter
@@ -610,11 +610,12 @@ class AnalyticsState:
         }
 
 
-def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_dict):
+def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_dict, active_streams=1):
     """Main RTSP inference loop for a single source."""
     from server import update_frame, update_raw_frame, update_metrics, add_alert
 
-    print(f"[+] Starting optimized inference: {name}")
+    gpu_fraction = get_dynamic_gpu_fraction(active_streams)
+    print(f"[+] Starting optimized inference: {name} (GPU fraction: {gpu_fraction:.0%} for {active_streams} streams)")
 
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
 
@@ -644,7 +645,7 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
     half_precision = False
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        torch.cuda.set_per_process_memory_fraction(YOLO_GPU_MEMORY_FRACTION)
+        torch.cuda.set_per_process_memory_fraction(gpu_fraction)
         device = "cuda"
         half_precision = True
         torch.backends.cudnn.benchmark = True
@@ -966,9 +967,15 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
         torch.cuda.empty_cache()
 
 
-def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, overlay_dict, is_crowd=False):
-    """Process an uploaded video file with inference - loops the video."""
-    print(f"[+] Starting upload inference: {name} from {file_path}, is_crowd={is_crowd}")
+def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, overlay_dict, is_crowd=False, active_streams=1, realtime=False):
+    """Process an uploaded video file with inference - loops the video.
+
+    Args:
+        realtime: If False, process as fast as possible. If True, match video FPS.
+    """
+    gpu_fraction = get_dynamic_gpu_fraction(active_streams)
+    speed_mode = "realtime" if realtime else "max speed"
+    print(f"[+] Starting upload inference: {name} from {file_path}, is_crowd={is_crowd}, GPU: {gpu_fraction:.0%}, mode: {speed_mode}")
 
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
 
@@ -1005,7 +1012,7 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
     half_precision = False
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        torch.cuda.set_per_process_memory_fraction(YOLO_GPU_MEMORY_FRACTION)
+        torch.cuda.set_per_process_memory_fraction(gpu_fraction)
         device = "cuda"
         half_precision = True
         torch.backends.cudnn.benchmark = True
@@ -1277,9 +1284,11 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
             except:
                 pass
 
-        elapsed = time.time() - frame_start
-        if elapsed < frame_interval:
-            time.sleep(frame_interval - elapsed)
+        # Only throttle to video FPS if realtime mode is enabled
+        if realtime:
+            elapsed = time.time() - frame_start
+            if elapsed < frame_interval:
+                time.sleep(frame_interval - elapsed)
 
     cap.release()
     gc.collect()
