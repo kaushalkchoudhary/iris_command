@@ -19,17 +19,20 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR"
-LOG_ROOT="$PROJECT_DIR/logs"
-LOG_DIR="$LOG_ROOT"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+LOG_ROOT="$ROOT_DIR/logs"
+DATE_DIR="$(date '+%Y-%m-%d')"
+LOG_DIR="$LOG_ROOT/$DATE_DIR"
+TS="$(date '+%H-%M-%S')"
 DATA_DIR="$SCRIPT_DIR/data"
 CONFIG_DIR="$SCRIPT_DIR/config"
 
 mkdir -p "$LOG_DIR"
-MEDIAMTX_LOG="$LOG_DIR/mediamtx.log"
-BACKEND_LOG="$LOG_DIR/backend.log"
-FRONTEND_LOG="$LOG_DIR/frontend.log"
-MEDIAMTX_PID_FILE="$LOG_DIR/mediamtx.pid"
-BACKEND_PID_FILE="$LOG_DIR/inference.pid"
+MEDIAMTX_LOG="$LOG_DIR/mediamtx-$TS.log"
+BACKEND_LOG="$LOG_DIR/backend-$TS.log"
+FRONTEND_LOG="$LOG_DIR/frontend-$TS.log"
+MEDIAMTX_PID_FILE="$LOG_ROOT/mediamtx.pid"
+BACKEND_PID_FILE="$LOG_ROOT/inference.pid"
 
 # Colors for output
 RED='\033[0;31m'
@@ -47,6 +50,21 @@ warn() {
 
 error() {
     echo -e "${RED}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $1"
+}
+
+latest_log_path() {
+    local pattern="$1"
+    local logs=()
+    local latest=""
+
+    shopt -s nullglob
+    logs=("$LOG_ROOT"/*/"$pattern")
+    shopt -u nullglob
+
+    if [ "${#logs[@]}" -gt 0 ]; then
+        latest="$(ls -1t "${logs[@]}" 2>/dev/null | head -1)"
+    fi
+    echo "$latest"
 }
 
 is_pid_running() {
@@ -272,16 +290,18 @@ case "$1" in
         status
         ;;
     logs)
+        LATEST_BACKEND_LOG="$(latest_log_path 'backend-*.log')"
+        LATEST_MEDIAMTX_LOG="$(latest_log_path 'mediamtx-*.log')"
         echo "=== Backend Log (latest) ==="
-        if [ -f "$BACKEND_LOG" ]; then
-            tail -50 "$BACKEND_LOG"
+        if [ -n "$LATEST_BACKEND_LOG" ] && [ -f "$LATEST_BACKEND_LOG" ]; then
+            tail -50 "$LATEST_BACKEND_LOG"
         else
             echo "No backend log found"
         fi
         echo ""
         echo "=== MediaMTX Log (latest) ==="
-        if [ -f "$MEDIAMTX_LOG" ]; then
-            tail -30 "$MEDIAMTX_LOG"
+        if [ -n "$LATEST_MEDIAMTX_LOG" ] && [ -f "$LATEST_MEDIAMTX_LOG" ]; then
+            tail -30 "$LATEST_MEDIAMTX_LOG"
         else
             echo "No mediamtx log found"
         fi

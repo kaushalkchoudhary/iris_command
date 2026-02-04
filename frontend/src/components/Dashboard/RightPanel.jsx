@@ -114,7 +114,8 @@ const OverlayToggles = ({ selectedVideos = [], accentColor = 'cyan', useCase = '
   const [overlay, setOverlay] = useState({
     heatmap: true,
     heatmap_full: true,
-    bboxes: true,
+    heatmap_trails: true,
+    bboxes: false,
   });
   const [isUpdating, setIsUpdating] = useState(false);
 
@@ -128,7 +129,8 @@ const OverlayToggles = ({ selectedVideos = [], accentColor = 'cyan', useCase = '
           setOverlay({
             heatmap: data.heatmap ?? true,
             heatmap_full: data.heatmap_full ?? true,
-            bboxes: data.bboxes ?? true,
+            heatmap_trails: data.heatmap_trails ?? true,
+            bboxes: data.bboxes ?? false,
           });
         }
       } catch (e) {}
@@ -136,7 +138,7 @@ const OverlayToggles = ({ selectedVideos = [], accentColor = 'cyan', useCase = '
     fetchOverlay();
   }, [selectedVideos]);
 
-  const updateOverlay = useCallback(async (key, value) => {
+  const updateOverlay = useCallback(async (updates) => {
     setIsUpdating(true);
     try {
       await Promise.all(
@@ -144,7 +146,7 @@ const OverlayToggles = ({ selectedVideos = [], accentColor = 'cyan', useCase = '
           fetch(`${API_BASE_URL}/overlays/${v.id}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ [key]: value }),
+            body: JSON.stringify(updates),
           })
         )
       );
@@ -156,22 +158,38 @@ const OverlayToggles = ({ selectedVideos = [], accentColor = 'cyan', useCase = '
 
   const toggle = (key) => {
     const next = !overlay[key];
-    setOverlay(prev => ({ ...prev, [key]: next }));
-    updateOverlay(key, next);
+    const updates = { [key]: next };
+
+    // When turning off master heatmap, turn off both types
+    if (key === 'heatmap' && !next) {
+      updates.heatmap_full = false;
+      updates.heatmap_trails = false;
+    }
+    // When turning on a heatmap type, ensure master is on
+    if ((key === 'heatmap_full' || key === 'heatmap_trails') && next) {
+      updates.heatmap = true;
+    }
+
+    setOverlay(prev => ({ ...prev, ...updates }));
+    updateOverlay(updates);
   };
 
   if (selectedVideos.length === 0) return null;
 
   const isCrowd = useCase === 'crowd';
+
+  // For congestion mode: Heatmap (master), Full, Per-Vehicle, Boxes
+  // For crowd mode: Heatmap, Full only
   const toggleItems = isCrowd
     ? [
         { key: 'heatmap', label: 'Heatmap' },
         { key: 'heatmap_full', label: 'Full' },
       ]
     : [
-        { key: 'heatmap', label: 'Heatmap' },
+        { key: 'heatmap', label: 'Heat' },
         { key: 'heatmap_full', label: 'Full' },
-        { key: 'bboxes', label: 'Vehicles' },
+        { key: 'heatmap_trails', label: 'Trail' },
+        { key: 'bboxes', label: 'Box' },
       ];
 
   return (
@@ -183,7 +201,7 @@ const OverlayToggles = ({ selectedVideos = [], accentColor = 'cyan', useCase = '
         </div>
         {isUpdating && <Loader2 className="w-3 h-3 text-white/40 animate-spin" />}
       </div>
-      <div className={`grid gap-1.5 ${isCrowd ? 'grid-cols-2' : 'grid-cols-3'}`}>
+      <div className={`grid gap-1.5 ${isCrowd ? 'grid-cols-2' : 'grid-cols-4'}`}>
         {toggleItems.map(t => (
           <button
             key={t.key}

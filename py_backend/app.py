@@ -8,6 +8,14 @@ import time
 import threading
 import multiprocessing as mp
 
+# CRITICAL: Set spawn method before any multiprocessing objects are created
+# This must happen before importing modules that use multiprocessing
+if __name__ == "__main__" or mp.current_process().name == "MainProcess":
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass  # Already set
+
 from log_utils import setup_process_logging
 from server import (
     run_control_server,

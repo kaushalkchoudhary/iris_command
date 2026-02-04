@@ -1182,6 +1182,19 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
             if overlay.get("trails", True) and trail_renderer:
                 trail_renderer.render(out, current_ids)
 
+            # Compute and send metrics
+            now = time.time()
+            if now - last_metrics_time >= 0.5:  # Send metrics every 0.5s
+                if analytics:
+                    metrics = analytics.update(tracked)
+                    metrics["fps"] = round(actual_fps, 1)
+                    try:
+                        if not m_q.full():
+                            m_q.put_nowait((name, metrics))
+                    except:
+                        pass
+                last_metrics_time = now
+
         encode_params_out = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY, cv2.IMWRITE_JPEG_OPTIMIZE, 1]
         ret_enc, buffer = cv2.imencode(".jpg", out, encode_params_out)
         if ret_enc:

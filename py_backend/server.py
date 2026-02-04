@@ -696,6 +696,19 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
+@app.exception_handler(413)
+async def _payload_too_large_handler(request, exc):
+    """Return 413 with CORS headers for large file uploads."""
+    return JSONResponse(
+        status_code=413,
+        content={"detail": "File too large. Maximum upload size is 500MB."},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "*",
+            "Access-Control-Allow-Headers": "*",
+        },
+    )
+
 @app.exception_handler(Exception)
 async def _global_exception_handler(request, exc):
     """Return 500 with CORS headers so the browser doesn't mask the real error."""
@@ -704,7 +717,11 @@ async def _global_exception_handler(request, exc):
     return JSONResponse(
         status_code=500,
         content={"detail": str(exc)},
-        headers={"Access-Control-Allow-Origin": "*"},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "*",
+            "Access-Control-Allow-Headers": "*",
+        },
     )
 
 
