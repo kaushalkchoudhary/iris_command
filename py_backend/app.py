@@ -102,9 +102,9 @@ def main():
     global spawn_ctx, overlay_shared_dict, frame_queue, raw_frame_queue, metrics_queue, alert_queue
     setup_process_logging("backend")
 
-    # Prefer fork on Linux to avoid SemLock rebuild issues in some environments.
+    # CUDA requires 'spawn' start method - cannot re-initialize CUDA in forked subprocess.
     # Allow override via IRIS_MP_START_METHOD=spawn|fork|forkserver.
-    default_method = "fork" if os.name == "posix" else "spawn"
+    default_method = "spawn"
     method = os.environ.get("IRIS_MP_START_METHOD", default_method)
     if method not in mp.get_all_start_methods():
         method = default_method

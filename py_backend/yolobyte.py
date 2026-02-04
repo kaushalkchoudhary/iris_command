@@ -620,7 +620,6 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
     trail_renderer = None
     heatmap_renderer = None
     full_heatmap_renderer = None
-    full_heatmap_renderer = None
     bbox_smoother = None
     crowd_analytics = None
     analytics = None
@@ -983,6 +982,7 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
     tracker = None
     trail_renderer = None
     heatmap_renderer = None
+    full_heatmap_renderer = None
     bbox_smoother = None
     crowd_analytics = None
     analytics = None
