@@ -57,7 +57,7 @@ def classify_speed(speed_px_s: float) -> int:
 
 
 class AnalyticsState:
-    """Track analytics state for a single video source."""
+    """Track analytics state for a single video source with ego-motion compensation."""
 
     __slots__ = (
         "width", "height", "fps", "frame_area", "track_positions",
@@ -68,7 +68,8 @@ class AnalyticsState:
         "track_speed_history", "track_position_history",
         "track_state", "track_behavior", "track_impact_score",
         "grid_congestion_ema", "grid_first_hot", "grid_hot_history",
-        "prev_region_cell_count", "hot_regions_cache"
+        "prev_region_cell_count", "hot_regions_cache",
+        "ego_motion_x", "ego_motion_y", "speed_categories"
     )
 
     def __init__(self, width: int, height: int, fps: float, class_names: dict = None):
@@ -97,6 +98,10 @@ class AnalyticsState:
         self.grid_hot_history = {}
         self.prev_region_cell_count = 0
         self.hot_regions_cache = []
+        # Ego-motion compensation
+        self.ego_motion_x = 0.0
+        self.ego_motion_y = 0.0
+        self.speed_categories = {}
 
     def update(self, tracked_detections) -> dict:
         self.fps_frame_count += 1
@@ -113,11 +118,38 @@ class AnalyticsState:
         total_area = 0.0
         new_positions = {}
         class_counts = {}
+        displacements = []  # For ego-motion estimation
 
         xyxys = tracked_detections.xyxy
         tids = tracked_detections.tracker_id
         class_ids = tracked_detections.class_id
 
+        # First pass: collect all displacements for ego-motion estimation
+        for i in range(len(tids)):
+            x1, y1, x2, y2 = xyxys[i]
+            tid = tids[i]
+            cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+
+            if tid in self.track_positions:
+                old_cx, old_cy, _ = self.track_positions[tid]
+                dx, dy = cx - old_cx, cy - old_cy
+                displacements.append((dx, dy))
+
+        # Estimate ego-motion as median displacement (drone/camera movement)
+        if len(displacements) >= 3:
+            dx_list = [d[0] for d in displacements]
+            dy_list = [d[1] for d in displacements]
+            ego_dx = float(np.median(dx_list))
+            ego_dy = float(np.median(dy_list))
+            # Smooth ego-motion estimate
+            self.ego_motion_x = self.ego_motion_x * 0.3 + ego_dx * 0.7
+            self.ego_motion_y = self.ego_motion_y * 0.3 + ego_dy * 0.7
+        else:
+            # Not enough tracks, decay ego-motion estimate
+            self.ego_motion_x *= 0.9
+            self.ego_motion_y *= 0.9
+
+        # Second pass: calculate compensated speeds
         for i in range(len(tids)):
             x1, y1, x2, y2 = xyxys[i]
             tid = tids[i]
@@ -134,12 +166,16 @@ class AnalyticsState:
             speed_px_s = 0.0
             if tid in self.track_positions:
                 old_cx, old_cy, old_speed = self.track_positions[tid]
-                dx, dy = cx - old_cx, cy - old_cy
+                # Compensate for ego-motion (subtract drone movement)
+                dx = (cx - old_cx) - self.ego_motion_x
+                dy = (cy - old_cy) - self.ego_motion_y
                 raw_speed = np.sqrt(dx * dx + dy * dy) * self.fps
                 speed_px_s = old_speed * 0.4 + raw_speed * 0.6 if old_speed > 0 else raw_speed
 
             new_positions[tid] = (cx, cy, speed_px_s)
-            speed_counts[classify_speed(speed_px_s)] += 1
+            speed_cat = classify_speed(speed_px_s)
+            speed_counts[speed_cat] += 1
+            self.speed_categories[tid] = speed_cat
 
         self.track_positions = new_positions
         self._update_vehicle_analytics()
