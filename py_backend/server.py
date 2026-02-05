@@ -550,14 +550,12 @@ def update_metrics(stream: str, data: dict):
             info = upload_sources.get(stream)
             if info:
                 info["started_processing"] = True
+                if not info.get("started_at"):
+                    info["started_at"] = time.time()
 
     if data.get("__finished__"):
-        with upload_sources_lock:
-            info = upload_sources.get(stream)
-            if info: info["finished"] = True
-        with jobs_lock:
-            for job in jobs.values():
-                if job.get("name") == stream: job["status"] = "completed"
+        # Ignore finished flag for uploads to avoid premature completion UI.
+        # Reports are triggered manually by the user.
         return
 
     if active_mode == "forensics":
@@ -609,12 +607,11 @@ def get_all_metrics():
                 if start_t:
                     m[name]["start_time"] = start_t
 
-    # Merge Upload finished status & duration
+    # Merge Upload duration
     with upload_sources_lock:
         for name, info in upload_sources.items():
             if name not in m:
                 m[name] = {}
-            m[name]["finished"] = info.get("finished", False)
             dur = info.get("duration", 0.0)
             if dur > 0:
                 m["total_duration"] = dur
@@ -1234,8 +1231,13 @@ def api_generate_report(name: str):
 
     # Resolve per-source mode (overrides global active_mode)
     report_mode = None
+    with upload_sources_lock:
+        upload_info = upload_sources.get(name)
+        if upload_info and upload_info.get("mode"):
+            report_mode = upload_info.get("mode")
     with overlay_lock:
-        report_mode = (overlays.get(name) or {}).get("active_mode")
+        if not report_mode:
+            report_mode = (overlays.get(name) or {}).get("active_mode")
     if not report_mode:
         report_mode = source_metrics.get("mode") if isinstance(source_metrics, dict) else None
     if not report_mode:
@@ -1483,8 +1485,13 @@ def _stop_upload_by_name(name: str, delete_file: bool = False):
 
 @app.post("/api/upload")
 async def upload_video(file: UploadFile = File(...), mode: Optional[str] = Form(None)):
-    if not file.filename.endswith((".mp4", ".mkv", ".avi", ".mov")):
-        raise HTTPException(400, "Unsupported file format. Use MP4, MKV, AVI, or MOV.")
+    filename = file.filename or ""
+    filename_lc = filename.lower()
+    if not filename_lc.endswith((".mp4", ".mkv", ".avi", ".mov")):
+        # Allow common video MIME types even if filename casing/extension is odd
+        content_type = (file.content_type or "").lower()
+        if not content_type.startswith("video/"):
+            raise HTTPException(400, "Unsupported file format. Use MP4, MKV, AVI, or MOV.")
 
     global active_mode
     if mode and active_mode and mode != active_mode:
@@ -1550,8 +1557,9 @@ async def upload_video(file: UploadFile = File(...), mode: Optional[str] = Form(
             "job_id": job_id,
             "original_name": original_name,
             "duration": duration,
-            "finished": False,
             "started_processing": False,
+            "started_at": None,
+            "mode": active_mode,
         }
 
     with jobs_lock:
@@ -1591,14 +1599,19 @@ def restart_upload(name: str):
             raise HTTPException(404, "Upload not active or found")
 
     # 2. Start again
+    # Preserve the original mode of this upload if available
+    upload_mode = None
+    with upload_sources_lock:
+        upload_mode = upload_sources.get(name, {}).get("mode")
+
     base_overlay = MODE_OVERLAYS.get(
-        active_mode,
+        upload_mode or active_mode,
         {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": False},
     )
-    mode_confidence = MODE_CONFIDENCE.get(active_mode, 0.15)
-    overlay_config = {**base_overlay, "confidence": mode_confidence, "active_mode": active_mode}
+    mode_confidence = MODE_CONFIDENCE.get(upload_mode or active_mode, 0.15)
+    overlay_config = {**base_overlay, "confidence": mode_confidence, "active_mode": (upload_mode or active_mode)}
     
-    is_crowd_mode = active_mode == "crowd"
+    is_crowd_mode = (upload_mode or active_mode) == "crowd"
     
     # Update overlays dict
     with overlay_lock:
@@ -1629,7 +1642,8 @@ def restart_upload(name: str):
             "file_path": file_path,
             "job_id": job_id,
             "original_name": original_name,
-            "finished": False # Reset status
+            "started_at": None,
+            "mode": (upload_mode or active_mode),
         }
     
     # Reset job status
@@ -1654,7 +1668,6 @@ def list_uploads():
                     "original_name": info.get("original_name", name),
                     "job_id": info.get("job_id"),
                     "stream_url": f"/api/stream/{name}",
-                    "finished": info.get("finished", False),
                     "stopped": info.get("stopped", False),
                 }
                 for name, info in upload_sources.items()

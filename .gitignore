@@ -290,3 +290,5 @@ ss1.png
 py_backend/data/sam_vit_h_4b8939.pth
 py_backend/data/events/py_backend/data/*.db
 py_backend/sam3/assets/*.gz
+py_backend/data/auth.db
+py_backend/data/events/

@@ -317,6 +317,7 @@ class FFmpegFileCapture:
             "ffmpeg",
             "-nostdin",
             "-loglevel", "error",
+            "-re",
             "-hwaccel", "cuda",
             "-hwaccel_output_format", "cuda",
         ]

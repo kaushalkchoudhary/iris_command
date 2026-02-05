@@ -462,25 +462,25 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
 
   const isUpload = video.type === 'upload';
 
-  // Poll 'finished' status for uploads
+  // Finished flag disabled for uploads (avoid premature completion UI)
   const [isFinished, setIsFinished] = useState(false);
+  const [hadAnyFrame, setHadAnyFrame] = useState(false);
+  const [uploadRawSeen, setUploadRawSeen] = useState(false);
+  const [uploadRawGraceExpired, setUploadRawGraceExpired] = useState(false);
   useEffect(() => {
-    if (!isUpload || isFinished) return;
-    const interval = setInterval(async () => {
-      try {
-        const res = await fetch(`${API_BASE_URL}/uploads`);
-        if (res.ok) {
-          const data = await res.json();
-          const me = data.uploads.find(u => u.name === video.id);
-          if (me && me.finished) {
-            setIsFinished(true);
-            setIsCellLoading(false); // Stop loading animation
-          }
-        }
-      } catch (e) { }
-    }, 2000);
-    return () => clearInterval(interval);
-  }, [isUpload, video.id, isFinished]);
+    if (isUpload) {
+      setIsFinished(false);
+    }
+  }, [isUpload, video.id]);
+
+  // For uploads: give raw MJPEG a short grace window to appear before switching to processed
+  useEffect(() => {
+    if (!isUpload) return;
+    setUploadRawSeen(false);
+    setUploadRawGraceExpired(false);
+    const t = setTimeout(() => setUploadRawGraceExpired(true), 1200);
+    return () => clearTimeout(t);
+  }, [isUpload, video.id]);
 
   // Phase 1: instant raw RTSP via WebRTC (skip for uploads — no raw source exists)
   const { videoRef: rawVideoRef, connected: rawConnected } = useWebRTC(video.id, !isUpload && !isFinished);
@@ -541,7 +541,9 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
   // Since we don't have the last frame stored in frontend, we might see black or frozen last frame.
   // Ideally, valid cleanup on backend keeps the stream available or we just accept the "finished" UI state.
   const showProcessed = (processedPlaying || isFinished) && (isUpload || !isForensics) && !showForensicsResult;
-  const showRawMjpeg = !rawPlaying || rawStalled;
+  const showRawMjpeg = isUpload
+    ? (!showForensicsResult && (!processedPlaying || (!uploadRawSeen && !uploadRawGraceExpired)))
+    : (!rawPlaying || rawStalled);
 
   const setRawStalledSafe = (value) => {
     rawStalledRef.current = value;
@@ -603,7 +605,7 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
       <img
         src={rawMjpegUrl}
         alt="IRIS Raw MJPEG"
-        onLoad={() => setRawPlaying(true)}
+        onLoad={() => { setRawPlaying(true); setHadAnyFrame(true); setUploadRawSeen(true); }}
         className="absolute inset-0 w-full h-full object-cover"
         style={{
           ...maskStyle,
@@ -642,7 +644,7 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
           autoPlay
           playsInline
           muted
-          onPlaying={() => setProcessedPlaying(true)}
+          onPlaying={() => { setProcessedPlaying(true); setHadAnyFrame(true); }}
           className="absolute inset-0 w-full h-full object-cover"
           style={{
             ...maskStyle,
@@ -664,7 +666,7 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
       )}
 
       {/* Awaiting analysis prompt overlay */}
-      {isForensics && !samResult && (isUpload ? processedConnected : rawConnected) && !isFinished && (
+      {isForensics && !samResult && (isUpload ? hadAnyFrame : rawConnected) && !isFinished && (
         <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
           <div className="px-4 py-2 bg-black/70 border border-amber-500/30 backdrop-blur-sm">
             <span className="text-[10px] font-black uppercase tracking-[0.3em] text-amber-400/80">
@@ -675,7 +677,7 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
       )}
 
       {/* Processing Finished Overlay */}
-      {isFinished && (
+      {isFinished && hadAnyFrame && (
         <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
           <div className="bg-black/60 backdrop-blur-sm border border-emerald-500/40 px-6 py-4 flex flex-col items-center gap-2">
             <div className="text-emerald-400 text-lg font-bold tracking-widest">ANALYSIS COMPLETE</div>
@@ -692,8 +694,8 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
         let reason = '';
 
         if (isUpload) {
-          canDownload = isFinished;
-          reason = 'WAITING FOR COMPLETION';
+          canDownload = hadAnyFrame;
+          reason = hadAnyFrame ? '' : 'WAITING FOR FEED';
         } else {
           // RTSP: Check start_time from metrics
           if (sourceMetrics?.start_time) {
