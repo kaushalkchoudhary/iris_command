@@ -36,6 +36,22 @@ const uploadChipLabel = (name = '') => {
 const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh, useCase }) => {
   /* ── METRICS ── */
   const [fps, setFps] = useState(null);
+  const [isOnline, setIsOnline] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/health`);
+        if (!cancelled) setIsOnline(res.ok);
+      } catch (e) {
+        if (!cancelled) setIsOnline(false);
+      }
+    };
+    poll();
+    const t = setInterval(poll, 3000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
 
   useEffect(() => {
     const poll = async () => {
@@ -175,7 +191,7 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh, useCas
     xhr.send(formData);
   };
 
-  const toggleUploadedVideo = (upload) => {
+  const toggleUploadedVideo = async (upload) => {
     const video = {
       id: upload.name,
       type: 'upload',
@@ -187,6 +203,12 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh, useCas
       if (selectedVideos.length === 1) return;
       onVideosChange(selectedVideos.filter(v => v.id !== upload.name));
     } else {
+      // Restart the upload inference on backend before showing it
+      try {
+        await fetch(`${API_BASE_URL}/uploads/${upload.name}/restart`, { method: 'POST' });
+      } catch (e) {
+        console.error('Failed to restart upload:', e);
+      }
       onVideosChange([...selectedVideos, video]);
     }
   };
@@ -198,8 +220,10 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh, useCas
       {/* LEFT — Status */}
       <div className="flex items-center gap-2 sm:gap-3 md:gap-4 shrink-0">
         <div className="flex items-center gap-1.5">
-          <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
-          <span className="text-[9px] sm:text-[10px] md:text-[11px] text-emerald-400/90 font-bold tracking-wider">ONLINE</span>
+          <div className={`w-1.5 h-1.5 rounded-full ${isOnline ? 'bg-emerald-400 animate-pulse' : 'bg-red-500'}`} />
+          <span className={`text-[9px] sm:text-[10px] md:text-[11px] font-bold tracking-wider ${isOnline ? 'text-emerald-400/90' : 'text-red-400'}`}>
+            {isOnline ? 'ONLINE' : 'OFFLINE'}
+          </span>
         </div>
 
         <span className="text-white/10 hidden sm:inline">|</span>
@@ -224,7 +248,7 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh, useCas
       {/* CENTER — Camera selector + Upload */}
       <div className="flex items-center gap-1.5 sm:gap-2 md:gap-3 min-w-0 flex-1 justify-center">
         <div className="flex items-center gap-px bg-white/[0.03] border border-white/[0.06] rounded-sm overflow-x-auto min-w-0"
-             style={{ scrollbarWidth: 'none' }}>
+          style={{ scrollbarWidth: 'none' }}>
           {videos.map((vid, idx) => {
             const label = vid.label === 'UPLOADED'
               ? uploadedMap[vid.id] || 'UP'

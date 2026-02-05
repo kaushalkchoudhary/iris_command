@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -9,8 +9,10 @@ import {
     ChevronRight,
     Users,
     ShieldCheck,
-    Cpu
+    Cpu,
+    LogOut
 } from 'lucide-react';
+import { API_BASE_URL } from '../../config';
 
 const USE_CASES = [
     {
@@ -67,22 +69,27 @@ const USE_CASES = [
         bgGlow: 'bg-teal-400/10',
         stats: '08 Active Nodes',
         status: 'Idle'
-    },
-    {
-        id: 'safety',
-        title: 'Public Safety',
-        description: 'Anomaly detection, unattended object tracking, and automated threat alerting.',
-        icon: ShieldCheck,
-        color: 'text-emerald-400',
-        borderColor: 'border-emerald-400/30',
-        bgGlow: 'bg-emerald-400/10',
-        stats: '23 Active Nodes',
-        status: 'Operational'
     }
 ];
 
-const WelcomeScreen = () => {
+const WelcomeScreen = ({ onLogout }) => {
     const navigate = useNavigate();
+    const [isOnline, setIsOnline] = useState(false);
+
+    useEffect(() => {
+        let cancelled = false;
+        const poll = async () => {
+            try {
+                const res = await fetch(`${API_BASE_URL}/health`);
+                if (!cancelled) setIsOnline(res.ok);
+            } catch (e) {
+                if (!cancelled) setIsOnline(false);
+            }
+        };
+        poll();
+        const t = setInterval(poll, 3000);
+        return () => { cancelled = true; clearInterval(t); };
+    }, []);
     return (
         <div className="fixed inset-0 bg-[#050a14] z-[100] flex flex-col overflow-y-auto">
             {/* Background Effects */}
@@ -99,9 +106,18 @@ const WelcomeScreen = () => {
                 <div className="flex items-center gap-6" />
                 <div className="flex items-center gap-6">
                     <div className="flex items-center gap-2">
-                        <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-                        <span className="text-[10px] text-emerald-500 font-bold tracking-widest uppercase">Nodes: Operational</span>
+                        <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
+                        <span className={`text-[10px] font-bold tracking-widest uppercase ${isOnline ? 'text-emerald-500' : 'text-red-400'}`}>
+                            System: {isOnline ? 'Online' : 'Offline'}
+                        </span>
                     </div>
+                    <button
+                        onClick={onLogout}
+                        className="p-1.5 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 hover:border-red-500/40 transition-all text-red-400/80 hover:text-red-400"
+                        title="Logout"
+                    >
+                        <LogOut className="w-3.5 h-3.5" />
+                    </button>
                 </div>
             </header>
 
@@ -136,7 +152,7 @@ const WelcomeScreen = () => {
                     </div>
                 </motion.div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 w-full">
+                <div className="grid grid-cols-1 md:grid-cols-6 gap-4 w-full">
                     {USE_CASES.map((useCase, idx) => (
                         <motion.button
                             key={useCase.id}
@@ -144,7 +160,9 @@ const WelcomeScreen = () => {
                             animate={{ opacity: 1, y: 0 }}
                             transition={{ delay: idx * 0.1 }}
                             onClick={() => navigate(`/${useCase.id}`)}
-                            className={`group relative flex flex-col text-left p-4 bg-white/5 border ${useCase.borderColor} hover:border-white/30 transition-all duration-500 overflow-hidden text-white`}
+                            className={`group relative flex flex-col text-left p-4 bg-white/5 border ${useCase.borderColor} hover:border-white/30 transition-all duration-500 overflow-hidden text-white ${
+                                idx < 3 ? 'md:col-span-2' : 'md:col-span-3'
+                            }`}
                         >
                             {/* Card Hover Glow */}
                             <div className={`absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500 ${useCase.bgGlow}`} />

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { LogOut } from 'lucide-react';
 
 /* Animated IRIS icon — radar sweep with pulsing core and orbiting arcs */
-const IrisIcon = ({ className = '' }) => (
+export const IrisIcon = ({ className = '' }) => (
     <svg viewBox="0 0 24 24" fill="none" className={className}>
         {/* Outer ring — slow rotate */}
         <g>
@@ -33,7 +33,7 @@ const IrisIcon = ({ className = '' }) => (
     </svg>
 );
 
-const Header = ({ onReset, onLogout }) => {
+const Header = ({ onReset }) => {
     const [now, setNow] = useState(new Date());
     const [uptime, setUptime] = useState(0);
     const [showFull, setShowFull] = useState(false);
@@ -98,20 +98,13 @@ const Header = ({ onReset, onLogout }) => {
                 <span className="text-white/80 tabular-nums">{uptimeStr}</span>
             </div>
 
-            {/* RIGHT — Username + Logout */}
+            {/* RIGHT — Username */}
             <div className="flex items-center gap-3">
                 <span className="px-2 py-0.5 bg-amber-500/10 border border-amber-500/30 text-[10px] text-amber-400/80 tracking-widest font-bold">
                     RESTRICTED
                 </span>
                 <span className="text-white/15 text-xs">|</span>
                 <span className="text-xs text-white/80 font-bold tracking-wider uppercase">{username}</span>
-                <button
-                    onClick={onLogout}
-                    className="p-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 hover:border-red-500/40 transition-all text-red-400/80 hover:text-red-400"
-                    title="Logout"
-                >
-                    <LogOut className="w-3.5 h-3.5" />
-                </button>
             </div>
         </div>
     );

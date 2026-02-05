@@ -208,6 +208,11 @@ start_inference() {
     PYTHONUNBUFFERED=1 \
     IRIS_LOG_PATH="$BACKEND_LOG" \
     IRIS_FRONTEND_LOG_PATH="$FRONTEND_LOG" \
+    IRIS_USE_NVENC=1 \
+    IRIS_GPU_DECODE=1 \
+    IRIS_GPU_DECODE_UPLOADS=1 \
+    IRIS_REQUIRE_CUDA=1 \
+    IRIS_PERSIST_ACTIVE_SOURCES=0 \
     OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp|buffer_size;262144|analyzeduration;50000|probesize;50000|fflags;nobuffer|flags;low_delay" \
     "$PYTHON_BIN" -u app.py >> "$BACKEND_LOG" 2>&1 &
 

@@ -15,4 +15,4 @@ cd "$PROJECT_DIR"
 exec env PYTHONUNBUFFERED=1 \
   IRIS_LOG_PATH="$BACKEND_LOG" \
   OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp|buffer_size;262144|analyzeduration;50000|probesize;50000|fflags;nobuffer|flags;low_delay" \
-  "$PROJECT_DIR/.venv/bin/python" -u app.py >/dev/null 2>&1
+  "$PROJECT_DIR/.venv/bin/python" -u app.py >>"$BACKEND_LOG" 2>&1

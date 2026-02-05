@@ -12,6 +12,8 @@ import { API_BASE_URL, WEBRTC_BASE, HLS_BASE } from './config';
 
 // ── MODE CONFIGURATION ──
 // Overlays are hardcoded in the backend per mode. Frontend only knows theme.
+const ENABLE_PUBLIC_SAFETY = false;
+
 const MODE_CONFIG = {
   congestion: {
     theme: { glow: 'rgba(6,182,212,0.15)', grid: 'rgba(0, 255, 255, 0.3)', accent: 'cyan' },
@@ -80,7 +82,7 @@ const MetricCard = ({ borderColor = 'cyan', children, className = '' }) => {
   const accent = accentColors[borderColor] || accentColors.cyan;
   return (
     <div className={`relative bg-black/70 backdrop-blur-md px-3 py-2 text-center min-w-[72px] ${className}`}
-         style={{ boxShadow: `0 0 10px ${accent}15, inset 0 0 20px rgba(0,0,0,0.3)` }}>
+      style={{ boxShadow: `0 0 10px ${accent}15, inset 0 0 20px rgba(0,0,0,0.3)` }}>
       {/* Outer corner accents */}
       <div className="absolute top-0 left-0 w-3 h-3 border-t border-l pointer-events-none" style={{ borderColor: accent, opacity: 0.7 }} />
       <div className="absolute top-0 right-0 w-3 h-3 border-t border-r pointer-events-none" style={{ borderColor: accent, opacity: 0.7 }} />
@@ -344,7 +346,7 @@ const useWebRTC = (streamName, enabled = true, options = {}) => {
             const data = await res.json();
             if (data.ready) return true;
           }
-        } catch (e) {}
+        } catch (e) { }
         await new Promise(r => setTimeout(r, 800));
       }
       return false;
@@ -429,20 +431,67 @@ const useWebRTC = (streamName, enabled = true, options = {}) => {
 const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics }) => {
   const [isCellLoading, setIsCellLoading] = useState(true);
   const [rawPlaying, setRawPlaying] = useState(false);
+  const [rawStalled, setRawStalled] = useState(false);
   const [processedPlaying, setProcessedPlaying] = useState(false);
   const [samResult, setSamResult] = useState(null);
+  const [reportLoading, setReportLoading] = useState(false);
+  const rawTimeRef = useRef(0);
+  const rawStalledRef = useRef(false);
+
+  const handleGenerateReport = async () => {
+    if (reportLoading) return;
+    setReportLoading(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/report/${video.id}`, { method: 'POST' });
+      if (!res.ok) throw new Error('Report generation failed');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `iris_report_${video.id}_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error('Report generation failed:', e);
+    } finally {
+      setReportLoading(false);
+    }
+  };
 
   const isUpload = video.type === 'upload';
 
+  // Poll 'finished' status for uploads
+  const [isFinished, setIsFinished] = useState(false);
+  useEffect(() => {
+    if (!isUpload || isFinished) return;
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/uploads`);
+        if (res.ok) {
+          const data = await res.json();
+          const me = data.uploads.find(u => u.name === video.id);
+          if (me && me.finished) {
+            setIsFinished(true);
+            setIsCellLoading(false); // Stop loading animation
+          }
+        }
+      } catch (e) { }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [isUpload, video.id, isFinished]);
+
   // Phase 1: instant raw RTSP via WebRTC (skip for uploads — no raw source exists)
-  const { videoRef: rawVideoRef, connected: rawConnected } = useWebRTC(video.id, !isUpload);
+  const { videoRef: rawVideoRef, connected: rawConnected } = useWebRTC(video.id, !isUpload && !isFinished);
+  const rawMjpegUrl = `${API_BASE_URL}/raw/${video.id}`;
 
   // Phase 2: processed feed via WebRTC (libx264 baseline → RTSP → MediaMTX → WebRTC)
   const processedStreamName = `processed_${video.id}`;
   const isForensics = useCase === 'forensics';
   const { videoRef: processedVideoRef, connected: processedConnected } = useWebRTC(
     processedStreamName,
-    isUpload || !isForensics,  // Uploads always use processed; non-forensics drones too
+    (isUpload || !isForensics) && !isFinished,  // Stop attempting WebRTC if finished
     {
       initialDelayMs: 2000,
       retryDelayMs: 3000,
@@ -452,16 +501,17 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
 
   // Hide loader once video is rendering — brief delay to show "FEED LOCKED" state
   useEffect(() => {
+    if (isFinished) return;
     const isReady = isUpload ? processedPlaying : rawPlaying;
     if (!isReady) return;
     const timer = setTimeout(() => setIsCellLoading(false), 600);
     return () => clearTimeout(timer);
-  }, [rawPlaying, processedPlaying, isUpload]);
+  }, [rawPlaying, processedPlaying, isUpload, isFinished]);
 
   // Poll forensics result when in forensics mode
   useEffect(() => {
-    if (!isForensics) {
-      setSamResult(null);
+    if (!isForensics || isFinished) {
+      if (!isFinished) setSamResult(null);
       return;
     }
     const fetchResult = async () => {
@@ -473,12 +523,12 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
             setSamResult(data);
           }
         }
-      } catch (e) {}
+      } catch (e) { }
     };
     fetchResult();
     const interval = setInterval(fetchResult, 1000);
     return () => clearInterval(interval);
-  }, [video.id, isForensics]);
+  }, [video.id, isForensics, isFinished]);
 
   const maskStyle = {
     maskImage: 'linear-gradient(to right, transparent 0%, black 12%, black 88%, transparent 100%), linear-gradient(to bottom, transparent 0%, black 12%, black 88%, transparent 100%)',
@@ -487,12 +537,39 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
   };
 
   const showForensicsResult = isForensics && !!samResult;
-  const showProcessed = processedConnected && (isUpload || !isForensics) && !showForensicsResult;
+  // If finished, we might not have a playing video, but we want to show the last frame if possible.
+  // Since we don't have the last frame stored in frontend, we might see black or frozen last frame.
+  // Ideally, valid cleanup on backend keeps the stream available or we just accept the "finished" UI state.
+  const showProcessed = (processedPlaying || isFinished) && (isUpload || !isForensics) && !showForensicsResult;
+  const showRawMjpeg = !rawPlaying || rawStalled;
+
+  const setRawStalledSafe = (value) => {
+    rawStalledRef.current = value;
+    setRawStalled(value);
+  };
+
+  // Detect stalled raw WebRTC feed and fall back to MJPEG until processed is ready.
+  useEffect(() => {
+    if (isUpload || isFinished || !rawPlaying || showProcessed || showForensicsResult) return;
+    let last = rawTimeRef.current;
+    const timer = setInterval(() => {
+      const vid = rawVideoRef.current;
+      if (!vid) return;
+      const now = vid.currentTime;
+      if (now === last) {
+        if (!rawStalledRef.current) setRawStalledSafe(true);
+      } else {
+        last = now;
+        if (rawStalledRef.current) setRawStalledSafe(false);
+      }
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [isUpload, isFinished, rawPlaying, showProcessed, showForensicsResult]);
 
   return (
     <div className={`relative overflow-hidden group ${getVideoClass(index, total)}`}>
       <AnimatePresence>
-        {isCellLoading && (
+        {isCellLoading && !isFinished && (
           <IRISLoader
             connected={isUpload ? processedConnected : rawConnected}
             ready={isUpload ? processedPlaying : rawPlaying}
@@ -515,12 +592,25 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
       {/* Drone label - inside corner accents, below top-left inner bracket */}
       <div className="absolute top-[25px] left-5 z-30 pointer-events-none">
         <div className="flex items-center gap-1.5 px-2 py-0.5 bg-black/70 border border-cyan-400/30 backdrop-blur-md shadow-[0_0_10px_rgba(6,182,212,0.12)]">
-          <div className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
-          <span className="text-[10px] font-black uppercase tracking-[0.15em] text-cyan-300">
-            {video.label || video.id}
+          <div className={`w-1.5 h-1.5 rounded-full ${isFinished ? 'bg-emerald-400' : 'bg-cyan-400 animate-pulse'}`} />
+          <span className={`text-[10px] font-black uppercase tracking-[0.15em] ${isFinished ? 'text-emerald-300' : 'text-cyan-300'}`}>
+            {video.label || video.id} {isFinished ? '(DONE)' : ''}
           </span>
         </div>
       </div>
+
+      {/* Layer 0: MJPEG raw fallback — fastest to appear */}
+      <img
+        src={rawMjpegUrl}
+        alt="IRIS Raw MJPEG"
+        onLoad={() => setRawPlaying(true)}
+        className="absolute inset-0 w-full h-full object-cover"
+        style={{
+          ...maskStyle,
+          opacity: (showRawMjpeg && !showProcessed && !showForensicsResult) ? 1 : 0,
+          transition: 'opacity 0.5s ease',
+        }}
+      />
 
       {/* Layer 1: WebRTC raw RTSP — instant, always underneath (hidden for uploads) */}
       {!isUpload && (
@@ -529,11 +619,17 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
           autoPlay
           playsInline
           muted
-          onPlaying={() => setRawPlaying(true)}
+          onPlaying={() => { setRawPlaying(true); setRawStalledSafe(false); }}
+          onTimeUpdate={(e) => { rawTimeRef.current = e.currentTarget.currentTime; }}
+          onWaiting={() => setRawStalledSafe(true)}
+          onStalled={() => setRawStalledSafe(true)}
+          onPause={() => setRawStalledSafe(true)}
+          onEnded={() => setRawStalledSafe(true)}
+          onError={() => setRawStalledSafe(true)}
           className="absolute inset-0 w-full h-full object-cover"
           style={{
             ...maskStyle,
-            opacity: isCellLoading ? 0 : (showProcessed || showForensicsResult) ? 0 : 1,
+            opacity: isCellLoading ? 0 : (showProcessed || showForensicsResult || rawStalled) ? 0 : 1,
             transition: isCellLoading ? 'none' : 'opacity 0.5s ease',
           }}
         />
@@ -552,6 +648,7 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
             ...maskStyle,
             opacity: showProcessed ? 1 : 0,
             transition: 'opacity 0.5s ease',
+            filter: isFinished ? 'grayscale(0.5) brightness(0.8)' : 'none', // dim when finished
           }}
         />
       )}
@@ -567,7 +664,7 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
       )}
 
       {/* Awaiting analysis prompt overlay */}
-      {isForensics && !samResult && (isUpload ? processedConnected : rawConnected) && (
+      {isForensics && !samResult && (isUpload ? processedConnected : rawConnected) && !isFinished && (
         <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
           <div className="px-4 py-2 bg-black/70 border border-amber-500/30 backdrop-blur-sm">
             <span className="text-[10px] font-black uppercase tracking-[0.3em] text-amber-400/80">
@@ -576,6 +673,71 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
           </div>
         </div>
       )}
+
+      {/* Processing Finished Overlay */}
+      {isFinished && (
+        <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
+          <div className="bg-black/60 backdrop-blur-sm border border-emerald-500/40 px-6 py-4 flex flex-col items-center gap-2">
+            <div className="text-emerald-400 text-lg font-bold tracking-widest">ANALYSIS COMPLETE</div>
+            <div className="text-emerald-500/60 text-xs tracking-widest uppercase">Report Ready</div>
+          </div>
+        </div>
+      )}
+
+      {/* Report button — bottom right (Logic: Upload needs finished, RTSP needs >60s active) */}
+      {(() => {
+        if (isCellLoading) return null;
+
+        let canDownload = false;
+        let reason = '';
+
+        if (isUpload) {
+          canDownload = isFinished;
+          reason = 'WAITING FOR COMPLETION';
+        } else {
+          // RTSP: Check start_time from metrics
+          if (sourceMetrics?.start_time) {
+            const elapsed = (Date.now() / 1000) - sourceMetrics.start_time;
+            if (elapsed > 60) {
+              canDownload = true;
+            } else {
+              reason = `ANALYZING (${Math.max(0, 60 - Math.floor(elapsed))}s)`;
+            }
+          } else {
+            // Fallback if no start time yet (assume just started)
+            reason = 'ANALYZING...';
+          }
+        }
+
+        if (!canDownload && !reason) reason = 'LOCKED';
+
+        return (
+          <button
+            onClick={handleGenerateReport}
+            disabled={reportLoading || !canDownload}
+            className={`absolute bottom-[25px] right-5 z-30 flex items-center gap-1.5 px-2.5 py-1 backdrop-blur-md shadow-[0_0_10px_rgba(6,182,212,0.12)] transition-all group/report ${canDownload
+                ? (isFinished
+                  ? 'bg-emerald-900/80 border border-emerald-400/50 hover:bg-emerald-800 hover:border-emerald-300 cursor-pointer'
+                  : 'bg-black/70 border border-cyan-400/30 hover:border-cyan-400/60 hover:bg-black/80 cursor-pointer')
+                : 'bg-black/50 border border-white/10 opacity-70 cursor-not-allowed'
+              }`}
+            title={canDownload ? "Generate incident report" : "Report available after analysis"}
+          >
+            {reportLoading ? (
+              <div className={`w-3 h-3 border-t border-r rounded-full animate-spin ${isFinished ? 'border-emerald-300' : 'border-cyan-400'}`} />
+            ) : (
+              <svg className={`w-3 h-3 ${canDownload ? (isFinished ? 'text-emerald-300' : 'text-cyan-400/70') : 'text-white/30'} ${canDownload ? 'group-hover/report:text-white' : ''}`} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M4 1h6l4 4v10H4V1z" />
+                <path d="M10 1v4h4" />
+                <path d="M6 8h6M6 11h4" />
+              </svg>
+            )}
+            <span className={`text-[9px] font-black uppercase tracking-[0.15em] ${canDownload ? (isFinished ? 'text-emerald-200' : 'text-cyan-300/70') : 'text-white/30'} ${canDownload ? 'group-hover/report:text-white' : ''}`}>
+              {reportLoading ? 'GENERATING...' : (canDownload ? 'DOWNLOAD REPORT' : reason)}
+            </span>
+          </button>
+        );
+      })()}
 
       {/* Per-video metrics HUD — left & right panels */}
       <MetricsHUD metrics={sourceMetrics} useCase={useCase} samResult={samResult} />
@@ -591,6 +753,9 @@ const Dashboard = ({ onLogout }) => {
   const modeConfig = MODE_CONFIG[useCase];
 
   if (!modeConfig) {
+    return <Navigate to="/" replace />;
+  }
+  if (useCase === 'safety' && !ENABLE_PUBLIC_SAFETY) {
     return <Navigate to="/" replace />;
   }
 
@@ -627,8 +792,14 @@ const Dashboard = ({ onLogout }) => {
   // Sync allVideos when useCase changes (different drones for different modes)
   useEffect(() => {
     setAllVideos(filteredDrones);
-    setSelectedVideos([]);  // Clear selection when switching modes
   }, [filteredDrones]);
+
+  // On route change, stop all processing and reset selection
+  useEffect(() => {
+    stopAllProcessing();
+    setSelectedVideos([]);
+    setAllMetrics({});
+  }, [useCase]);
 
   // Poll metrics from backend every 1.5s
   useEffect(() => {
@@ -641,7 +812,7 @@ const Dashboard = ({ onLogout }) => {
           const data = await res.json();
           setAllMetrics(data);
         }
-      } catch (e) {}
+      } catch (e) { }
     };
     poll();
     const interval = setInterval(poll, 1500);
@@ -665,6 +836,23 @@ const Dashboard = ({ onLogout }) => {
       cancelled = true;
     };
   }, [selectedVideos, useCase]);
+
+  // Stop processing immediately when a source is deselected (including uploads)
+  const prevSelectedRef = useRef([]);
+  useEffect(() => {
+    const prev = prevSelectedRef.current;
+    const removed = prev.filter(p => !selectedVideos.some(v => v.id === p.id));
+
+    removed.forEach((v) => {
+      if (v.type === 'upload') {
+        fetch(`${API_BASE_URL}/uploads/${v.id}/stop`, { method: 'POST' }).catch(() => {});
+      } else if (typeof v.droneIndex === 'number') {
+        stopDroneProcessing(v.droneIndex);
+      }
+    });
+
+    prevSelectedRef.current = selectedVideos;
+  }, [selectedVideos]);
 
   // On unmount (navigate to /), stop all processing
   useEffect(() => {
@@ -698,7 +886,7 @@ const Dashboard = ({ onLogout }) => {
   if (useCase === 'safety') {
     return (
       <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex-1 flex flex-col">
-        <Header onReset={() => navigate('/')} useCase={useCase} onLogout={onLogout} />
+        <Header onReset={() => navigate('/')} useCase={useCase} />
         <div className="flex-1 flex items-center justify-center relative overflow-hidden">
           {/* Background grid */}
           <div className="absolute inset-0 z-0 opacity-40 pointer-events-none"
@@ -754,7 +942,7 @@ const Dashboard = ({ onLogout }) => {
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex-1 flex flex-col">
-      <Header onReset={() => navigate('/')} useCase={useCase} onLogout={onLogout} />
+      <Header onReset={() => navigate('/')} useCase={useCase} />
 
       <div className="flex-1 flex min-h-0">
         <div className="flex-1 relative overflow-hidden">
@@ -821,7 +1009,7 @@ const AppContents = () => {
             path="/"
             element={
               isAuthenticated
-                ? <WelcomeScreen key="welcome" />
+                ? <WelcomeScreen key="welcome" onLogout={handleLogout} />
                 : <Login onLogin={handleLogin} />
             }
           />

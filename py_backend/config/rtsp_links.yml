@@ -1,18 +1,4 @@
-overlays:
-  upload1:
-    heatmap: true
-    heatmap_full: false
-    heatmap_trails: true
-    trails: false
-    bboxes: true
-    confidence: 0.3
-  bcpdrone8:
-    heatmap: true
-    heatmap_full: false
-    heatmap_trails: true
-    trails: false
-    bboxes: false
-    confidence: 0.3
+overlays: {}
 rtsp_links:
 - rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone1
 - rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone2
@@ -26,5 +12,4 @@ rtsp_links:
 - rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone10
 - rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone11
 - rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone12
-active_sources:
-- 8
+active_sources: []

@@ -15,7 +15,8 @@
 
 [Unit]
 Description=IRIS Command MediaMTX RTSP Server
-After=network.target
+Wants=network-online.target
+After=network-online.target
 Before=iris-backend.service
 
 [Service]
@@ -27,8 +28,10 @@ WorkingDirectory=/home/ubuntu/Desktop/iris_command/py_backend
 ExecStart=/home/ubuntu/Desktop/iris_command/py_backend/service/run_mediamtx.sh
 
 # Restart policy
-Restart=on-failure
+Restart=always
 RestartSec=3
+StartLimitIntervalSec=60
+StartLimitBurst=6
 
 # Logging
 StandardOutput=null

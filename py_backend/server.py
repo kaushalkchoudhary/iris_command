@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 from pathlib import Path
 from collections import deque
 import multiprocessing as mp
+from datetime import datetime
 
 import requests as http_requests
 import numpy as np
@@ -30,6 +31,8 @@ from sam import (
     sam_model_loaded, sam_results_lock, sam_results, sam_threads,
 )
 from log_utils import env_log_path, new_log_path
+from report import generate_report, REPORTS_DIR
+from helpers import get_video_duration
 
 IRIS_LOCAL = os.environ.get("IRIS_LOCAL", "0") == "1"
 DEFAULT_MEDIAMTX_HOST = "127.0.0.1" if IRIS_LOCAL else "mediamtx1.stagingbot.xyz"
@@ -127,8 +130,9 @@ frame_lock = threading.Condition()
 frame_buffer: Dict[str, bytes] = {}
 frame_sequences: Dict[str, int] = {}
 
-raw_frame_lock = threading.Lock()
+raw_frame_lock = threading.Condition()
 raw_frame_buffer: Dict[str, bytes] = {}
+raw_frame_sequences: Dict[str, int] = {}
 
 jobs_lock = threading.Lock()
 jobs: Dict[str, dict] = {}
@@ -142,6 +146,7 @@ ffmpeg_log_files: Dict[str, object] = {}
 ffmpeg_writer_threads: Dict[str, threading.Thread] = {}
 ffmpeg_stop_events: Dict[str, threading.Event] = {}
 ffmpeg_next_start: Dict[str, float] = {}
+ffmpeg_frame_sequences: Dict[str, int] = {}
 MEDIAMTX_RTSP_PORT = int(os.environ.get("IRIS_MEDIAMTX_RTSP_PORT", "8554"))
 # Always publish to the local MediaMTX instance (same machine).
 # The remote hostname is only for frontend WebRTC consumption via Cloudflare.
@@ -149,7 +154,10 @@ MEDIAMTX_PUBLISH_BASE = os.environ.get(
     "IRIS_MEDIAMTX_PUBLISH_BASE",
     f"rtsp://127.0.0.1:{MEDIAMTX_RTSP_PORT}",
 )
-PROCESSED_FPS = int(os.environ.get("IRIS_PROCESSED_FPS", "15"))
+PROCESSED_FPS = int(os.environ.get("IRIS_PROCESSED_FPS", "30"))
+PERSIST_ACTIVE_SOURCES = os.environ.get("IRIS_PERSIST_ACTIVE_SOURCES", "0") == "1"
+MAX_RTSP_STREAMS = int(os.environ.get("IRIS_MAX_RTSP_STREAMS", "4"))
+MAX_UPLOAD_STREAMS = int(os.environ.get("IRIS_MAX_UPLOAD_STREAMS", "2"))
 USE_NVENC = os.environ.get("IRIS_USE_NVENC", "1") == "1"
 
 # Active mode tracking
@@ -306,6 +314,7 @@ def _ffmpeg_writer_worker(name: str, proc: subprocess.Popen, stop_event: threadi
         try:
             proc.stdin.write(frame.tobytes())
             proc.stdin.flush()
+            ffmpeg_frame_sequences[name] = ffmpeg_frame_sequences.get(name, 0) + 1
         except BrokenPipeError:
             break
         except Exception as e:
@@ -355,6 +364,8 @@ def _start_ffmpeg_publisher(name: str, wait_timeout: float = 8.0) -> bool:
         "ffmpeg",
         "-nostdin",
         "-loglevel", "warning",
+        "-fflags", "nobuffer",
+        "-flags", "low_delay",
         "-f", "rawvideo",
         "-pix_fmt", "bgr24",
         "-s", f"{width}x{height}",
@@ -362,8 +373,9 @@ def _start_ffmpeg_publisher(name: str, wait_timeout: float = 8.0) -> bool:
         "-i", "pipe:0",
         "-vf", "format=yuv420p",
         *encoder_args,
-        "-g", "30",
+        "-g", str(PROCESSED_FPS * 2),
         "-bf", "0",
+        "-threads", "1",
         "-f", "rtsp",
         "-rtsp_transport", "tcp",
         rtsp_url,
@@ -399,6 +411,7 @@ def _start_ffmpeg_publisher(name: str, wait_timeout: float = 8.0) -> bool:
 
 def _stop_ffmpeg_publisher(name: str):
     ffmpeg_next_start.pop(name, None)
+    ffmpeg_frame_sequences.pop(name, None)
     stop_event = ffmpeg_stop_events.pop(name, None)
     if stop_event:
         stop_event.set()
@@ -491,57 +504,73 @@ def _stop_all_ffmpeg_publishers():
 
 def ensure_overlay(name: str):
     with overlay_lock:
-        try:
-            if name in overlays:
-                existing = overlays[name]
-                has_keys = False
-                try:
-                    has_keys = "trails" in existing and "heatmap" in existing and "bboxes" in existing
-                except:
-                    pass
-                if has_keys:
-                    if "heatmap_full" not in existing:
-                        existing["heatmap_full"] = existing.get("heatmap", True)
-                    if "heatmap_trails" not in existing:
-                        existing["heatmap_trails"] = existing.get("heatmap", True)
-                    if "confidence" not in existing:
-                        existing["confidence"] = 0.15
-                        overlays[name] = existing
-                    return
-            default_state = {
-                "heatmap": True,
-                "heatmap_full": True,
-                "heatmap_trails": True,
-                "trails": True,
-                "bboxes": True,
-                "confidence": 0.15,
-            }
-            overlays[name] = default_state
-            print(f"[OVERLAY] Initialized {name}: {default_state}")
-        except Exception as e:
-            overlays[name] = {
-                "heatmap": True,
-                "heatmap_full": True,
-                "heatmap_trails": True,
-                "trails": True,
-                "bboxes": True,
-                "confidence": 0.15,
-            }
-            print(f"[OVERLAY] Initialized {name} (after error: {e})")
+        if name in overlays:
+            existing = overlays[name]
+            # Ensure all required keys exist
+            if isinstance(existing, dict) and "trails" in existing and "heatmap" in existing and "bboxes" in existing:
+                if "heatmap_full" not in existing:
+                    existing["heatmap_full"] = existing.get("heatmap", True)
+                if "heatmap_trails" not in existing:
+                    existing["heatmap_trails"] = existing.get("heatmap", True)
+                if "confidence" not in existing:
+                    existing["confidence"] = 0.15
+                return
+        
+        # Initialize with defaults
+        default_state = {
+            "heatmap": True,
+            "heatmap_full": True,
+            "heatmap_trails": True,
+            "trails": True,
+            "bboxes": True,
+            "confidence": 0.15,
+        }
+        overlays[name] = default_state
+        print(f"[OVERLAY] Initialized {name}: {default_state}")
 
 def get_overlay_state(stream: str) -> Dict[str, bool]:
     ensure_overlay(stream)
     with overlay_lock:
-        try:
-            return dict(overlays[stream])
-        except:
-            return {"heatmap": True, "heatmap_full": True, "heatmap_trails": True, "trails": True, "bboxes": True}
+        return dict(overlays.get(stream, {
+            "heatmap": True, 
+            "heatmap_full": True, 
+            "heatmap_trails": True, 
+            "trails": True, 
+            "bboxes": True
+        }))
 
 def update_metrics(stream: str, data: dict):
+    # Handle critical workflow signals first
+    if data.get("__started__"):
+        with source_lock:
+            for info in running_sources.values():
+                if info.get("name") == stream:
+                    info["started_processing"] = True
+        with upload_sources_lock:
+            info = upload_sources.get(stream)
+            if info:
+                info["started_processing"] = True
+
+    if data.get("__finished__"):
+        with upload_sources_lock:
+            info = upload_sources.get(stream)
+            if info: info["finished"] = True
+        with jobs_lock:
+            for job in jobs.values():
+                if job.get("name") == stream: job["status"] = "completed"
+        return
+
+    if active_mode == "forensics":
+        # Suppress standard metrics data store in Forensics mode
+        return
+
     with metrics_lock:
         metrics[stream] = data
 
 def update_frame(stream: str, jpeg_data: bytes):
+    if not isinstance(jpeg_data, (bytes, bytearray)):
+        print(f"[ERROR] frame_buffer received {type(jpeg_data)} for {stream}, expected bytes")
+        return
     with frame_lock:
         frame_buffer[stream] = jpeg_data
         frame_sequences[stream] = frame_sequences.get(stream, 0) + 1
@@ -550,10 +579,47 @@ def update_frame(stream: str, jpeg_data: bytes):
 def update_raw_frame(stream: str, jpeg_data: bytes):
     with raw_frame_lock:
         raw_frame_buffer[stream] = jpeg_data
+        raw_frame_sequences[stream] = raw_frame_sequences.get(stream, 0) + 1
+        raw_frame_lock.notify_all()
 
 def get_all_metrics():
     with metrics_lock:
-        return metrics.copy()
+        raw_m = metrics.copy()
+    
+    m = {}
+    # Only return metrics if processing has actually started
+    with source_lock:
+        active_names = {info.get("name"): info.get("started_processing", False) for info in running_sources.values()}
+    with upload_sources_lock:
+        for name, info in upload_sources.items():
+            active_names[name] = info.get("started_processing", False)
+
+    for name, data in raw_m.items():
+        if active_names.get(name):
+            m[name] = data
+
+    # Merge RTSP start times
+    with source_lock:
+        for info in running_sources.values():
+            name = info.get("name")
+            start_t = info.get("start_time")
+            if name:
+                if name not in m:
+                    m[name] = {}
+                if start_t:
+                    m[name]["start_time"] = start_t
+
+    # Merge Upload finished status & duration
+    with upload_sources_lock:
+        for name, info in upload_sources.items():
+            if name not in m:
+                m[name] = {}
+            m[name]["finished"] = info.get("finished", False)
+            dur = info.get("duration", 0.0)
+            if dur > 0:
+                m["total_duration"] = dur
+
+    return m
 
 
 # ── Alert management ──
@@ -660,28 +726,81 @@ def clear_alerts():
 def _stop_all_sources():
     global active_mode
     stopped = 0
+    import torch
+    import gc
+    import time
 
+    print(f"[STOP_ALL] Initiating aggressive cleanup (Previous mode: {active_mode})")
+
+    # 1. Stop all primary inference processes
     with source_lock:
         for idx, src in list(running_sources.items()):
             src["stop"].set()
+            proc = src.get("process")
+            if proc:
+                try:
+                    proc.terminate()
+                    t_start = time.time()
+                    while proc.is_alive() and time.time() - t_start < 0.5:
+                        time.sleep(0.01)
+                    if proc.is_alive():
+                        proc.kill()
+                except:
+                    pass
             stopped += 1
         running_sources.clear()
 
+    # 2. Stop all SAM workers and unload model
     for src_name, info in list(sam_threads.items()):
+        print(f"[STOP_ALL] Stopping SAM worker for {src_name}")
         info["stop_event"].set()
     sam_threads.clear()
 
+    try:
+        from sam import unload_sam_model
+        unload_sam_model()
+    except:
+        pass
+
+    # 3. Clear SAM analytical results
     with sam_results_lock:
         sam_results.clear()
 
+    # 4. Stop all FFmpeg publishers (streaming)
+    _ffmpeg_monitor_sources.clear()
+    _stop_all_ffmpeg_publishers()
+
+    # 4b. Stop all upload processes and clear state
+    _stop_all_uploads(delete_files=False)
+
+    # 5. Clear ALL shared state/buffers
+    with metrics_lock:
+        metrics.clear()
+    with overlay_lock:
+        overlays.clear()
+    with frame_lock:
+        frame_buffer.clear()
+        frame_sequences.clear()
+    with raw_frame_lock:
+        raw_frame_buffer.clear()
+        raw_frame_sequences.clear()
+
+    # 6. Force Resource Reclamation
+    gc.collect()
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            print("[STOP_ALL] GPU memory cleared")
+    except:
+        pass
+
+    # 7. Reset active mode and config
+    active_mode = None 
     cfg = load_rtsp_config()
     cfg["active_sources"] = []
     save_rtsp_config(cfg)
 
-    _ffmpeg_monitor_sources.clear()
-    _stop_all_ffmpeg_publishers()
-
-    print(f"[STOP_ALL] Stopped {stopped} sources, cleared SAM workers, stopped ffmpeg publishers")
+    print(f"[STOP_ALL] Cleanup complete. Stopped {stopped} sources.")
     return stopped
 
 
@@ -754,6 +873,22 @@ def api_change_password(req: PasswordChangeRequest):
 def api_frontend_log(entry: FrontendLogEntry):
     _write_frontend_log(entry)
     return {"status": "ok"}
+
+
+# ── Health endpoint ──
+
+@app.get("/api/health")
+def api_health():
+    with source_lock:
+        rtsp_count = len(running_sources)
+    with upload_sources_lock:
+        upload_count = len(upload_sources)
+    return {
+        "status": "ok",
+        "active_mode": active_mode,
+        "rtsp_sources": rtsp_count,
+        "uploads": upload_count,
+    }
 
 
 # ── Overlay endpoints ──
@@ -878,6 +1013,7 @@ def list_sources():
             "name": name,
             "url": mask_rtsp(url),
             "active": idx in active,
+            "start_time": running_sources[idx].get("start_time") if idx in active else None,
         })
 
     return {"sources": out, "active_sources": sorted(active)}
@@ -895,34 +1031,45 @@ def start_source(req: SourceStartRequest):
         _stop_all_sources()
         active_mode = req.mode
 
+    url = cfg["rtsp_links"][req.index - 1]
+    name = source_display_name(url)
+
+    base_overlay = MODE_OVERLAYS.get(
+        active_mode,
+        {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": False},
+    )
+    mode_confidence = MODE_CONFIDENCE.get(active_mode, 0.15)
+    overlay_config = {**base_overlay, "confidence": mode_confidence, "active_mode": active_mode}
+
     with source_lock:
         if req.index in running_sources:
-            print(f"[START] Source {req.index} already active, restarting...")
-            src = running_sources.pop(req.index)
-            src["stop"].set()
-            time.sleep(1.0)
-
-            if 1 <= req.index <= len(cfg["rtsp_links"]):
-                prev_name = source_display_name(cfg["rtsp_links"][req.index - 1])
-                _stop_ffmpeg_publisher(prev_name)
-
-        url = cfg["rtsp_links"][req.index - 1]
-        name = source_display_name(url)
-
-        base_overlay = MODE_OVERLAYS.get(
-            active_mode,
-            {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": False},
-        )
-        mode_confidence = MODE_CONFIDENCE.get(active_mode, 0.15)
-        overlay_config = {**base_overlay, "confidence": mode_confidence}
+            print(f"[START] Source {req.index} ({name}) already active, skipping restart but updating config.")
+            # Update the shared overlay dict so the running process picks up changes
+            with overlay_lock:
+                overlays[name] = dict(overlay_config)
+            
+            if PERSIST_ACTIVE_SOURCES:
+                # Ensure it is in active_sources config
+                active = cfg.get("active_sources") or []
+                if req.index not in active:
+                    active.append(req.index)
+                cfg["active_sources"] = active
+                save_rtsp_config(cfg)
+                
+            return {"status": "started", "index": req.index, "mode": active_mode, "info": "already_running"}
 
         # Calculate total active streams (including this new one) for dynamic GPU allocation
         with upload_sources_lock:
             upload_count = len(upload_sources)
         active_streams = len(running_sources) + upload_count + 1
 
+        if len(running_sources) >= MAX_RTSP_STREAMS:
+            raise HTTPException(429, f"Maximum RTSP streams reached ({MAX_RTSP_STREAMS}).")
+
         process, stop = start_source_callback(req.index, url, name, overlay_config, active_streams)
-        running_sources[req.index] = {"process": process, "stop": stop}
+        if process is None:
+            raise HTTPException(500, "Failed to start source")
+        running_sources[req.index] = {"process": process, "stop": stop, "start_time": time.time(), "name": name}
 
     with overlay_lock:
         overlays[name] = dict(overlay_config)
@@ -932,11 +1079,12 @@ def start_source(req: SourceStartRequest):
     ffmpeg_next_start[name] = time.time() + 3.0
     _ensure_ffmpeg_monitor()
 
-    active = cfg.get("active_sources") or []
-    if req.index not in active:
-        active.append(req.index)
-    cfg["active_sources"] = active
-    save_rtsp_config(cfg)
+    if PERSIST_ACTIVE_SOURCES:
+        active = cfg.get("active_sources") or []
+        if req.index not in active:
+            active.append(req.index)
+        cfg["active_sources"] = active
+        save_rtsp_config(cfg)
     return {"status": "started", "index": req.index, "mode": active_mode}
 
 @app.post("/api/sources/stop")
@@ -950,13 +1098,46 @@ def stop_source(req: SourceIndexRequest):
         src = running_sources.pop(req.index, None)
         if src:
             src["stop"].set()
+            # Aggressively terminate the process
+            proc = src.get("process")
+            if proc:
+                try:
+                    proc.terminate()
+                    # Wait briefly for graceful exit, then force kill if needed
+                    import time
+                    t_start = time.time()
+                    while proc.is_alive() and time.time() - t_start < 1.0:
+                        time.sleep(0.05)
+                    if proc.is_alive():
+                        proc.kill()
+                except:
+                    pass
 
     if name:
         _ffmpeg_monitor_sources.discard(name)
         _stop_ffmpeg_publisher(name)
+        # Clear stale UI state
+        with metrics_lock:
+            metrics.pop(name, None)
+        with overlay_lock:
+            overlays.pop(name, None)
+        with frame_lock:
+            frame_buffer.pop(name, None)
+            frame_sequences.pop(name, 0)
 
-    cfg["active_sources"] = [i for i in cfg.get("active_sources", []) if i != req.index]
-    save_rtsp_config(cfg)
+    if PERSIST_ACTIVE_SOURCES:
+        cfg["active_sources"] = [i for i in cfg.get("active_sources", []) if i != req.index]
+        save_rtsp_config(cfg)
+    
+    # Flush GPU memory if all sources stopped
+    if not running_sources:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except:
+            pass
+
     return {"status": "stopped", "index": req.index}
 
 @app.post("/api/sources/stop_all")
@@ -977,7 +1158,7 @@ def get_metrics():
 def processed_ready(name: str):
     proc = ffmpeg_publishers.get(name)
     running = proc is not None and proc.poll() is None
-    has_frames = frame_sequences.get(name, 0) > 0
+    has_frames = ffmpeg_frame_sequences.get(name, 0) > 0
     return {"name": name, "ready": bool(running and has_frames)}
 
 @app.get("/api/alerts")
@@ -997,6 +1178,140 @@ def api_clear_alerts():
     return {"status": "cleared"}
 
 
+# ── Report generation endpoint ──
+
+@app.post("/api/report/{name}")
+def api_generate_report(name: str):
+    """Generate a Markdown incident report for a given source.
+
+    Captures current frame screenshot, metrics, and alerts.
+    Returns a ZIP file containing the report and screenshots.
+    """
+    import zipfile
+    import io
+
+    print(f"[REPORT] Generating report for {name}")
+    
+    # Grab current frame screenshot
+    with frame_lock:
+        screenshot = frame_buffer.get(name)
+        if screenshot and not isinstance(screenshot, (bytes, bytearray)):
+            print(f"[REPORT] WARNING: Screenshot for {name} is {type(screenshot)}, ignoring")
+            screenshot = None
+        
+        if screenshot:
+            print(f"[REPORT] Found screenshot for {name} ({len(screenshot)} bytes)")
+        else:
+            print(f"[REPORT] WARNING: No screenshot found for {name}")
+
+    # Grab current metrics for this source
+    with metrics_lock:
+        source_metrics = metrics.get(name) or {}
+        # Inject start_time from running_sources or upload_sources
+        source_start = None
+        
+        # Check RTSP sources
+        with source_lock:
+            for info in running_sources.values():
+                if info.get("name") == name:
+                    source_start = info.get("start_time")
+                    break
+        
+        # Check Uploads if not found
+        if not source_start:
+             with upload_sources_lock:
+                info = upload_sources.get(name)
+                if info:
+                    source_start = info.get("start_time")
+        
+        if source_start:
+            source_metrics["start_time"] = source_start
+
+        if source_metrics:
+            print(f"[REPORT] Found metrics for {name}")
+        else:
+            print(f"[REPORT] WARNING: No metrics found for {name}")
+
+    # Resolve per-source mode (overrides global active_mode)
+    report_mode = None
+    with overlay_lock:
+        report_mode = (overlays.get(name) or {}).get("active_mode")
+    if not report_mode:
+        report_mode = source_metrics.get("mode") if isinstance(source_metrics, dict) else None
+    if not report_mode:
+        report_mode = active_mode
+
+    # Forensics special: Inject data from sam_results
+    if report_mode == "forensics":
+        try:
+            from sam import sam_results, sam_results_lock
+            with sam_results_lock:
+                sam_info = sam_results.get(name)
+                if sam_info:
+                    source_metrics["prompt"] = sam_info.get("prompt")
+                    source_metrics["detection_count"] = sam_info.get("count", 0)
+                    source_metrics["session_history"] = sam_info.get("session_history", [])
+        except Exception as e:
+            print(f"[REPORT] Failed to inject SAM metrics: {e}")
+
+    # Grab alerts filtered for this source
+    with alerts_lock:
+        source_alerts = [a for a in alerts if a.get("source") == name]
+        print(f"[REPORT] Found {len(source_alerts)} alerts for {name}")
+
+    # Forensics special: Trigger VLM Analysis
+    vlm_narrative = None
+    if report_mode == "forensics":
+        # Check if SAM has actually analyzed anything
+        with sam_results_lock:
+            sam_info = sam_results.get(name)
+            if not sam_info:
+                raise HTTPException(400, "Forensic data matching this feed not found. Did you start a forensic search?")
+            
+            history = sam_info.get("session_history", [])
+            if not history:
+                raise HTTPException(400, "Forensic analysis cycle in progress. Please wait for at least one detection or analysis frame to be recorded.")
+
+        try:
+            from sam import generate_vlm_analysis
+            vlm_narrative = generate_vlm_analysis(name)
+        except Exception as e:
+            print(f"[REPORT] VLM Analysis failed: {e}")
+
+    try:
+        pdf_bytes = generate_report(
+            source_name=name,
+            screenshot_bytes=screenshot,
+            metrics_data=source_metrics,
+            alerts_list=source_alerts,
+            active_mode=report_mode,
+            vlm_narrative=vlm_narrative,
+        )
+        # print(f"[REPORT] PDF generated successfully ({len(pdf_bytes)} bytes)")
+    except Exception as e:
+        print(f"[REPORT] ERROR generating PDF: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, f"Report generation failed: {e}")
+
+    # Return PDF directly
+    if not isinstance(pdf_bytes, (bytes, bytearray)):
+        print(f"[REPORT] CRITICAL: generate_report returned {type(pdf_bytes)}, forcing cleanup")
+        if isinstance(pdf_bytes, str):
+            pdf_bytes = pdf_bytes.encode('latin-1')
+            
+    pdf_buffer = io.BytesIO(pdf_bytes)
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    pdf_filename = f"report_{name}_{timestamp}.pdf"
+
+    return StreamingResponse(
+        pdf_buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{pdf_filename}"'},
+    )
+
+
 # ── Stream endpoint ──
 
 @app.get("/api/stream/{name}")
@@ -1006,17 +1321,49 @@ def stream_video(name: str):
         while True:
             with frame_lock:
                 while frame_sequences.get(name, 0) <= last_seq:
-                    if not frame_lock.wait(timeout=0.3):
+                    # Zerolatency: Wait for any frame (raw or processed)
+                    if not frame_lock.wait(timeout=0.2):
                         break
 
                 frame = frame_buffer.get(name)
+                # Ensure we skip old frames if many accumulated
                 last_seq = frame_sequences.get(name, 0)
 
             if frame:
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-            else:
-                time.sleep(0.033)
+            
+            # Very tight loop for zerolatency
+            time.sleep(0.001)
+
+    return StreamingResponse(
+        generate(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+@app.get("/api/raw/{name}")
+def stream_raw_video(name: str):
+    def generate():
+        last_seq = -1
+        while True:
+            with raw_frame_lock:
+                while raw_frame_sequences.get(name, 0) <= last_seq:
+                    if not raw_frame_lock.wait(timeout=0.2):
+                        break
+
+                frame = raw_frame_buffer.get(name)
+                last_seq = raw_frame_sequences.get(name, 0)
+
+            if frame:
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+            time.sleep(0.001)
 
     return StreamingResponse(
         generate(),
@@ -1057,32 +1404,124 @@ def _next_upload_name() -> str:
         upload_name_counter += 1
         return f"upload{upload_name_counter}"
 
+def _stop_all_uploads(delete_files: bool = False):
+    """Stop all upload processes. Optionally delete files and entries."""
+    with upload_sources_lock:
+        names = list(upload_sources.keys())
+
+    for name in names:
+        _ffmpeg_monitor_sources.discard(name)
+        _stop_ffmpeg_publisher(name)
+
+    with upload_sources_lock:
+        for name, info in list(upload_sources.items()):
+            info["stop"].set()
+            proc = info.get("process")
+            if proc:
+                try:
+                    proc.terminate()
+                    proc.join(timeout=2)
+                except:
+                    pass
+            info["process"] = None
+            info["stopped"] = True
+            if delete_files:
+                try:
+                    Path(info["file_path"]).unlink()
+                except:
+                    pass
+                upload_sources.pop(name, None)
+
+    # Clear per-upload buffers/metrics/overlays (runtime state only)
+    with metrics_lock:
+        for name in names:
+            metrics.pop(name, None)
+    with overlay_lock:
+        for name in names:
+            overlays.pop(name, None)
+    with frame_lock:
+        for name in names:
+            frame_buffer.pop(name, None)
+            frame_sequences.pop(name, 0)
+    with raw_frame_lock:
+        for name in names:
+            raw_frame_buffer.pop(name, None)
+            raw_frame_sequences.pop(name, None)
+
+def _stop_upload_by_name(name: str, delete_file: bool = False):
+    _ffmpeg_monitor_sources.discard(name)
+    _stop_ffmpeg_publisher(name)
+    with upload_sources_lock:
+        info = upload_sources.get(name)
+        if not info:
+            return
+        info["stop"].set()
+        proc = info.get("process")
+        if proc:
+            try:
+                proc.terminate()
+                proc.join(timeout=2)
+            except Exception:
+                pass
+        if delete_file:
+            try:
+                Path(info["file_path"]).unlink()
+            except Exception:
+                pass
+        upload_sources.pop(name, None)
+
+    with metrics_lock:
+        metrics.pop(name, None)
+    with overlay_lock:
+        overlays.pop(name, None)
+    with frame_lock:
+        frame_buffer.pop(name, None)
+        frame_sequences.pop(name, 0)
+    with raw_frame_lock:
+        raw_frame_buffer.pop(name, None)
+        raw_frame_sequences.pop(name, None)
+
 @app.post("/api/upload")
 async def upload_video(file: UploadFile = File(...), mode: Optional[str] = Form(None)):
     if not file.filename.endswith((".mp4", ".mkv", ".avi", ".mov")):
         raise HTTPException(400, "Unsupported file format. Use MP4, MKV, AVI, or MOV.")
 
     global active_mode
-    if mode and mode != active_mode:
+    if mode and active_mode and mode != active_mode:
         print(f"[MODE] Switching from {active_mode} -> {mode} (upload)")
         _stop_all_sources()
         active_mode = mode
+    elif mode and not active_mode:
+        # Initialize active_mode without stopping existing streams
+        active_mode = mode
 
-    job_id = uuid.uuid4().hex
     original_name = Path(file.filename).stem
+    job_id = uuid.uuid4().hex
     name = _next_upload_name()
     ensure_overlay(name)
+
+    # Ensure directory exists in case it was deleted at runtime
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+    # If a previous upload with the same original name exists, stop and remove it
+    with upload_sources_lock:
+        existing = [n for n, info in upload_sources.items() if info.get("original_name") == original_name]
+    for n in existing:
+        _stop_upload_by_name(n, delete_file=False)
 
     target = UPLOAD_DIR / f"{job_id}_{file.filename}"
     with open(target, "wb") as f:
         shutil.copyfileobj(file.file, f)
+
+    # Probe duration
+    duration = get_video_duration(str(target))
 
     base_overlay = MODE_OVERLAYS.get(
         active_mode,
         {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": False},
     )
     mode_confidence = MODE_CONFIDENCE.get(active_mode, 0.15)
-    overlay_config = {**base_overlay, "confidence": mode_confidence}
+    overlay_config = {**base_overlay, "confidence": mode_confidence, "active_mode": active_mode}
 
     with overlay_lock:
         overlays[name] = dict(overlay_config)
@@ -1095,8 +1534,13 @@ async def upload_video(file: UploadFile = File(...), mode: Optional[str] = Form(
         upload_count = len(upload_sources)
     active_streams = len(running_sources) + upload_count + 1
 
-    # realtime=False for max processing speed on uploads
-    process, stop = start_upload_callback(str(target), name, overlay_config, is_crowd_mode, active_streams, realtime=False)
+    if upload_count >= MAX_UPLOAD_STREAMS:
+        raise HTTPException(429, f"Maximum upload streams reached ({MAX_UPLOAD_STREAMS}).")
+
+    # realtime=True so uploads play in real time with live overlays
+    process, stop = start_upload_callback(str(target), name, overlay_config, is_crowd_mode, active_streams, realtime=True)
+    if process is None:
+        raise HTTPException(500, "Failed to start upload inference")
 
     with upload_sources_lock:
         upload_sources[name] = {
@@ -1105,6 +1549,9 @@ async def upload_video(file: UploadFile = File(...), mode: Optional[str] = Form(
             "file_path": str(target),
             "job_id": job_id,
             "original_name": original_name,
+            "duration": duration,
+            "finished": False,
+            "started_processing": False,
         }
 
     with jobs_lock:
@@ -1117,9 +1564,85 @@ async def upload_video(file: UploadFile = File(...), mode: Optional[str] = Form(
     return {
         "job_id": job_id,
         "name": name,
-        "stream_url": f"/api/stream/{name}",
         "status": "started",
     }
+
+@app.post("/api/uploads/{name}/restart")
+def restart_upload(name: str):
+    """Stop and restart an existing upload."""
+    print(f"[UPLOAD] Restarting {name}")
+    
+    # 1. Stop if running
+    with upload_sources_lock:
+        if name in upload_sources:
+            info = upload_sources[name]
+            info["stop"].set()
+            if "process" in info:
+                try:
+                    info["process"].join(timeout=2)
+                except:
+                    pass
+            # Don't pop yet, we need the file path
+            file_path = info["file_path"]
+            original_name = info.get("original_name")
+            job_id = info.get("job_id")
+            info["stopped"] = False
+        else:
+            raise HTTPException(404, "Upload not active or found")
+
+    # 2. Start again
+    base_overlay = MODE_OVERLAYS.get(
+        active_mode,
+        {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": False},
+    )
+    mode_confidence = MODE_CONFIDENCE.get(active_mode, 0.15)
+    overlay_config = {**base_overlay, "confidence": mode_confidence, "active_mode": active_mode}
+    
+    is_crowd_mode = active_mode == "crowd"
+    
+    # Update overlays dict
+    with overlay_lock:
+        overlays[name] = dict(overlay_config)
+
+    # Recalculate streams count
+    with source_lock:
+        rtsp_count = len(running_sources)
+    with upload_sources_lock:
+        # It's still in the dict, so count is same
+        upload_count = len(upload_sources)
+    
+    active_streams = rtsp_count + upload_count
+
+    # Cleanup old process info in ffmpeg monitor just in case
+    _ffmpeg_monitor_sources.discard(name)
+    _stop_ffmpeg_publisher(name)
+
+    # Start new process
+    process, stop = start_upload_callback(file_path, name, overlay_config, is_crowd_mode, active_streams, realtime=True)
+    if process is None:
+        raise HTTPException(500, "Failed to restart upload inference")
+
+    with upload_sources_lock:
+        upload_sources[name] = {
+            "process": process,
+            "stop": stop,
+            "file_path": file_path,
+            "job_id": job_id,
+            "original_name": original_name,
+            "finished": False # Reset status
+        }
+    
+    # Reset job status
+    with jobs_lock:
+        if job_id in jobs:
+            jobs[job_id]["status"] = "processing"
+
+    # Restart monitor
+    _ffmpeg_monitor_sources.add(name)
+    ffmpeg_next_start[name] = time.time() + 3.0
+    _ensure_ffmpeg_monitor()
+
+    return {"status": "restarted", "name": name}
 
 @app.get("/api/uploads")
 def list_uploads():
@@ -1131,24 +1654,53 @@ def list_uploads():
                     "original_name": info.get("original_name", name),
                     "job_id": info.get("job_id"),
                     "stream_url": f"/api/stream/{name}",
+                    "finished": info.get("finished", False),
+                    "stopped": info.get("stopped", False),
                 }
                 for name, info in upload_sources.items()
             ]
         }
 
-@app.delete("/api/uploads/{name}")
+@app.post("/api/uploads/{name}/stop")
 def stop_upload(name: str):
+    _ffmpeg_monitor_sources.discard(name)
+    _stop_ffmpeg_publisher(name)
+    with upload_sources_lock:
+        info = upload_sources.get(name)
+        if info:
+            info["stop"].set()
+            proc = info.get("process")
+            if proc:
+                try:
+                    proc.terminate()
+                    proc.join(timeout=2)
+                except:
+                    pass
+            info["process"] = None
+            info["stopped"] = True
+            return {"status": "stopped", "name": name}
+    raise HTTPException(404, "Upload not found")
+
+@app.delete("/api/uploads/{name}")
+def delete_upload(name: str):
     _ffmpeg_monitor_sources.discard(name)
     _stop_ffmpeg_publisher(name)
     with upload_sources_lock:
         info = upload_sources.pop(name, None)
         if info:
             info["stop"].set()
+            proc = info.get("process")
+            if proc:
+                try:
+                    proc.terminate()
+                    proc.join(timeout=2)
+                except:
+                    pass
             try:
                 Path(info["file_path"]).unlink()
             except:
                 pass
-            return {"status": "stopped", "name": name}
+            return {"status": "deleted", "name": name}
     raise HTTPException(404, "Upload not found")
 
 
@@ -1159,10 +1711,14 @@ def sam_start(req: SamStartRequest):
     if not load_sam_model():
         raise HTTPException(503, "SAM3 model failed to load")
 
-    existing = sam_threads.get(req.source)
+    existing = sam_threads.pop(req.source, None)
     if existing:
         existing["stop_event"].set()
-        existing["thread"].join(timeout=5)
+        # Non-blocking or short-timeout join to avoid hanging API
+        # existing["thread"].join(timeout=1) 
+
+    with sam_results_lock:
+        sam_results[req.source] = {"session_history": [], "vlm_analysis": None}
 
     settings_ref = {
         "confidence": req.confidence,

@@ -1,13 +1,30 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { Shield, Lock, User, ChevronRight } from 'lucide-react';
+import { Lock, User, ChevronRight } from 'lucide-react';
 import { API_BASE_URL } from './config';
+import { IrisIcon } from './components/Dashboard/Header';
 
 const Login = ({ onLogin }) => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isOnline, setIsOnline] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/health`);
+        if (!cancelled) setIsOnline(res.ok);
+      } catch (e) {
+        if (!cancelled) setIsOnline(false);
+      }
+    };
+    poll();
+    const t = setInterval(poll, 3000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -52,15 +69,15 @@ const Login = ({ onLogin }) => {
       {/* Top Bar */}
       <header className="relative z-10 w-full h-20 border-b border-white/5 bg-black/40 backdrop-blur-md flex items-center justify-between px-8">
         <div className="flex items-center gap-4">
-          <Shield className="w-8 h-8 text-cyan-400" />
+          <IrisIcon className="w-8 h-8 text-cyan-400" />
           <span className="text-xl font-black text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-500 tracking-[0.2em] uppercase">
             IRIS COMMAND
           </span>
         </div>
         <div className="flex items-center gap-2">
-          <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-          <span className="text-[10px] text-emerald-500 font-bold tracking-widest uppercase">
-            System: Online
+          <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
+          <span className={`text-[10px] font-bold tracking-widest uppercase ${isOnline ? 'text-emerald-500' : 'text-red-400'}`}>
+            System: {isOnline ? 'Online' : 'Offline'}
           </span>
         </div>
       </header>
@@ -75,6 +92,7 @@ const Login = ({ onLogin }) => {
         >
           {/* Login Card */}
           <div className="group relative bg-white/5 border border-cyan-400/30 hover:border-cyan-400/50 transition-all duration-500 overflow-hidden">
+            <div className="iris-ray" />
             {/* Card Hover Glow */}
             <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500 bg-cyan-400/5" />
 

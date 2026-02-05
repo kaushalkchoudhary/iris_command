@@ -1,20 +1,20 @@
 """YOLO + ByteTrack inference pipeline for vehicle and crowd analytics."""
 
 import time
+import os
 import gc
 import threading
 from collections import deque
 
 import cv2
 import numpy as np
-import torch
-from ultralytics import YOLO
-import supervision as sv
 
 from helpers import (
-    create_capture, FrameCapture, BboxSmoother, raw_loader_worker,
+    create_capture, create_file_capture, FrameCapture, BboxSmoother, raw_loader_worker,
     INFERENCE_SIZE, SKIP_FRAMES, JPEG_QUALITY, MAX_DET,
-    BBOX_SMOOTH_ALPHA, get_dynamic_gpu_fraction,
+    BBOX_SMOOTH_ALPHA, get_dynamic_gpu_fraction, TARGET_FPS,
+    TRACK_ACTIVATION_THRESHOLD, TRACK_LOST_BUFFER, TRACK_MATCH_THRESHOLD, TRACK_MIN_CONSEC,
+    VEHICLE_CONF_THRESH, CROWD_CONF_THRESH,
 )
 from overlays import TrailRenderer, HeatmapRenderer, CrowdHeatmapRenderer, FullHeatmapRenderer
 from crowd import CrowdAnalyticsState, CrowdCounter
@@ -29,7 +29,7 @@ USE_CCN_FOR_CROWD = True
 CROWD_DRONES = {"bcpdrone10", "bcpdrone12"}
 
 # Alert settings
-CONGESTION_ALERT_THRESHOLD = 40
+CONGESTION_ALERT_THRESHOLD = 70
 
 # Speed thresholds in pixels/second
 THRESH_STALLED = 8.0
@@ -69,7 +69,8 @@ class AnalyticsState:
         "track_state", "track_behavior", "track_impact_score",
         "grid_congestion_ema", "grid_first_hot", "grid_hot_history",
         "prev_region_cell_count", "hot_regions_cache",
-        "ego_motion_x", "ego_motion_y", "speed_categories"
+        "ego_motion_x", "ego_motion_y", "speed_categories", "total_unique_ids",
+        "last_hot_regions_time"
     )
 
     def __init__(self, width: int, height: int, fps: float, class_names: dict = None):
@@ -98,21 +99,25 @@ class AnalyticsState:
         self.grid_hot_history = {}
         self.prev_region_cell_count = 0
         self.hot_regions_cache = []
+        self.total_unique_ids = set()
         # Ego-motion compensation
         self.ego_motion_x = 0.0
         self.ego_motion_y = 0.0
         self.speed_categories = {}
+        # Hot regions throttling
+        self.last_hot_regions_time = 0.0
 
     def update(self, tracked_detections) -> dict:
-        self.fps_frame_count += 1
-        elapsed = time.time() - self.fps_last_time
-        if elapsed >= 1.0:
-            self.fps_value = self.fps_frame_count / elapsed
-            self.fps_frame_count = 0
-            self.fps_last_time = time.time()
+        now = time.time()
+        elapsed = now - self.fps_last_time
+        if elapsed > 0:
+            instant_fps = 1.0 / elapsed
+            # Strong EMA for stable FPS display
+            self.fps_value = self.fps_value * 0.98 + instant_fps * 0.02
+        self.fps_last_time = now
 
         if tracked_detections is None or tracked_detections.tracker_id is None:
-            return self._build_metrics(0, [0, 0, 0, 0], 0.0, {})
+            return self._build_metrics(0, [0, 0, 0, 0], 0.0, {}, compute_hot_regions=False)
 
         speed_counts = [0, 0, 0, 0]
         total_area = 0.0
@@ -131,14 +136,20 @@ class AnalyticsState:
             cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
 
             if tid in self.track_positions:
-                old_cx, old_cy, _ = self.track_positions[tid]
+                old_cx, old_cy, _, old_ts = self.track_positions[tid]
+                dt = max(1e-3, min(0.5, now - old_ts))
                 dx, dy = cx - old_cx, cy - old_cy
-                displacements.append((dx, dy))
+                displacements.append((dx / dt, dy / dt))
 
         # Estimate ego-motion as median displacement (drone/camera movement)
         if len(displacements) >= 3:
-            dx_list = [d[0] for d in displacements]
-            dy_list = [d[1] for d in displacements]
+            # Use lowest-motion percentile to estimate camera motion robustly
+            mags = [np.hypot(d[0], d[1]) for d in displacements]
+            order = np.argsort(mags)
+            keep = max(3, int(len(order) * 0.3))
+            sel = order[:keep]
+            dx_list = [displacements[i][0] for i in sel]
+            dy_list = [displacements[i][1] for i in sel]
             ego_dx = float(np.median(dx_list))
             ego_dy = float(np.median(dy_list))
             # Smooth ego-motion estimate
@@ -165,21 +176,29 @@ class AnalyticsState:
 
             speed_px_s = 0.0
             if tid in self.track_positions:
-                old_cx, old_cy, old_speed = self.track_positions[tid]
+                old_cx, old_cy, old_speed, old_ts = self.track_positions[tid]
+                dt = max(1e-3, min(0.5, now - old_ts))
                 # Compensate for ego-motion (subtract drone movement)
-                dx = (cx - old_cx) - self.ego_motion_x
-                dy = (cy - old_cy) - self.ego_motion_y
-                raw_speed = np.sqrt(dx * dx + dy * dy) * self.fps
+                vx = (cx - old_cx) / dt - self.ego_motion_x
+                vy = (cy - old_cy) / dt - self.ego_motion_y
+                raw_speed = np.sqrt(vx * vx + vy * vy)
                 speed_px_s = old_speed * 0.4 + raw_speed * 0.6 if old_speed > 0 else raw_speed
 
-            new_positions[tid] = (cx, cy, speed_px_s)
+            new_positions[tid] = (cx, cy, speed_px_s, now)
             speed_cat = classify_speed(speed_px_s)
             speed_counts[speed_cat] += 1
             self.speed_categories[tid] = speed_cat
 
         self.track_positions = new_positions
         self._update_vehicle_analytics()
-        return self._build_metrics(len(tracked_detections), speed_counts, total_area, class_counts)
+        
+        # Compute hot regions only every 1 second (expensive operation)
+        now = time.time()
+        compute_hot = (now - self.last_hot_regions_time >= 1.0)
+        if compute_hot:
+            self.last_hot_regions_time = now
+        
+        return self._build_metrics(len(tracked_detections), speed_counts, total_area, class_counts, compute_hot_regions=compute_hot)
 
     def _update_vehicle_analytics(self):
         now = time.time()
@@ -194,11 +213,13 @@ class AnalyticsState:
                 d.pop(tid, None)
 
         for tid in active_tids:
-            cx, cy, speed = self.track_positions[tid]
+            cx, cy, speed, _ = self.track_positions[tid]
 
             if tid not in self.track_first_seen:
                 self.track_first_seen[tid] = now
             self.track_last_seen[tid] = now
+            if now - self.track_first_seen[tid] > 0.5 and len(self.track_position_history.get(tid, [])) >= 3:
+                self.total_unique_ids.add(tid)
 
             if tid not in self.track_speed_history:
                 self.track_speed_history[tid] = deque(maxlen=12)
@@ -299,7 +320,7 @@ class AnalyticsState:
         cell_stalled = [0] * ncells
         cell_slow = [0] * ncells
 
-        for tid, (cx, cy, speed) in self.track_positions.items():
+        for tid, (cx, cy, speed, _) in self.track_positions.items():
             col = min(int(cx / cell_w), HOT_GRID_COLS - 1)
             row = min(int(cy / cell_h), HOT_GRID_ROWS - 1)
             idx = row * HOT_GRID_COLS + col
@@ -477,7 +498,7 @@ class AnalyticsState:
         self.hot_regions_cache = result
         return result
 
-    def _build_metrics(self, detection_count: int, speed_counts: list, total_area: float, class_counts: dict = None) -> dict:
+    def _build_metrics(self, detection_count: int, speed_counts: list, total_area: float, class_counts: dict = None, compute_hot_regions: bool = True) -> dict:
         total = max(1, sum(speed_counts))
         stalled_pct = round(speed_counts[0] * 100 // total)
         slow_pct = round(speed_counts[1] * 100 // total)
@@ -554,7 +575,13 @@ class AnalyticsState:
             for cls_name, imp in type_impact.items():
                 type_influence[cls_name] = round(imp / total_impact, 2)
 
-        hot_regions = self._compute_hot_regions()
+        # Only compute hot regions when requested (throttled to 1Hz instead of 5Hz)
+        if compute_hot_regions:
+            hot_regions = self._compute_hot_regions()
+            self.hot_regions_cache = hot_regions
+        else:
+            hot_regions = self.hot_regions_cache
+
         hot_region_summary = {
             "active_count": len(hot_regions),
             "severity_counts": {
@@ -593,7 +620,8 @@ class AnalyticsState:
             "slow_pct": slow_pct,
             "medium_pct": medium_pct,
             "fast_pct": fast_pct,
-            "detection_count": detection_count,
+            "detection_count": len(self.total_unique_ids),
+            "current_detection_count": detection_count,
             "class_counts": class_counts or {},
             "state_counts": state_counts,
             "behavior_counts": behavior_counts,
@@ -627,32 +655,81 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
 
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    src_fps = cap.get(cv2.CAP_PROP_FPS) or 25
+    src_fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    if not src_fps or src_fps < 5:
+        src_fps = TARGET_FPS
 
-    # 2. Start background thread to stream raw frames at 5 FPS while model loads
+    # Determine model to load based on active_mode
+    active_mode = None
+    try:
+        conf = overlay_dict.get(name)
+        if hasattr(conf, 'get'):
+            active_mode = conf.get("active_mode")
+    except:
+        pass
+
+    if active_mode == "forensics":
+        print(f"[!] {name}: Forensics mode active (RTSP). Bypassing YOLO models for zero background load.")
+        while cap.isOpened() and not stop_event.is_set():
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                time.sleep(0.01)
+                continue
+            # Relay raw frames for SAM
+            ret_enc, buffer = cv2.imencode(".jpg", frame, encode_params)
+            if ret_enc:
+                data = buffer.tobytes()
+                try:
+                    if f_q.full(): f_q.get_nowait()
+                    f_q.put_nowait((name, data))
+                except: pass
+                try:
+                    if rf_q.full(): rf_q.get_nowait()
+                    rf_q.put_nowait((name, data))
+                except: pass
+            time.sleep(1.0 / PROCESSED_FPS)
+        cap.release()
+        return
+
+    # 2. Start background thread to stream raw frames while model loads
     model_loading = threading.Event()
     model_loading.set()
-
     loader_thread = threading.Thread(
         target=raw_loader_worker,
-        args=(cap, stop_event, model_loading, name, f_q, encode_params),
+        args=(cap, stop_event, model_loading, name, f_q, rf_q, encode_params),
         daemon=True,
     )
     loader_thread.start()
 
-    # Load model
-    device = "cpu"
-    half_precision = False
-    if torch.cuda.is_available():
+    # Load model dynamically
+    import torch
+    from ultralytics import YOLO
+    import supervision as sv
+
+    require_cuda = os.environ.get("IRIS_REQUIRE_CUDA", "0") == "1"
+    cuda_available = torch.cuda.is_available()
+    if require_cuda and not cuda_available:
+        print(f"[ERROR] {name}: CUDA required but not available. Exiting inference.")
+        cap.release()
+        return
+
+    device = "cuda" if cuda_available else "cpu"
+    if device == "cuda":
         torch.cuda.empty_cache()
         torch.cuda.set_per_process_memory_fraction(gpu_fraction)
-        device = "cuda"
-        half_precision = True
         torch.backends.cudnn.benchmark = True
+        try:
+            print(f"[CUDA] {name}: device={torch.cuda.get_device_name(0)} mem={torch.cuda.get_device_properties(0).total_memory // (1024**2)}MB")
+        except Exception as e:
+            print(f"[CUDA] {name}: device info unavailable ({e})")
+    else:
+        print(f"[CUDA] {name}: CUDA not available, using CPU")
 
-    is_crowd = name in CROWD_DRONES
+    is_crowd = (active_mode == "crowd")
     use_ccn = is_crowd and USE_CCN_FOR_CROWD
+    half_precision = (device == "cuda")
 
+    model = None
     tracker = None
     trail_renderer = None
     heatmap_renderer = None
@@ -662,63 +739,55 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
     analytics = None
     ccn_counter = None
 
-    if is_crowd:
-        model_path = MODEL_PATH_CROWD_YOLO
-        model = YOLO(model_path, task="detect")
-        if device == "cuda":
-            model.to(device)
+    # Variables for crowd mode
+    last_ccn_time = 0.0
+    ccn_interval = 1.0 / 5.0
+    cached_ccn_result = None
 
+    if active_mode == "crowd":
+        print(f"[+] {name}: Loading Crowd Analytics pipeline (Mode: {active_mode})")
+        model = YOLO(MODEL_PATH_CROWD_YOLO, task="detect")
+        if device == "cuda": model.to(device)
+        
         target_classes = [0]
         CLASS_NAMES = {0: "head"}
-        conf_thresh = 0.25
-        tracker = None
-        trail_renderer = None
+        conf_thresh = CROWD_CONF_THRESH
         heatmap_renderer = CrowdHeatmapRenderer(accumulate_frames=8)
-        bbox_smoother = None
         crowd_analytics = CrowdAnalyticsState(w, h, src_fps)
-        analytics = None
-
-        last_ccn_time = 0.0
-        ccn_interval = 1.0 / 5.0
-        cached_ccn_result = None
-
-        if use_ccn:
+        
+        if USE_CCN_FOR_CROWD:
             ccn_counter = CrowdCounter(MODEL_PATH_CROWD_CCN, device)
             print(f"[+] {name}: CCN crowd counting model loaded")
-
-        print(f"[+] {name}: YOLO head detection model loaded for crowd analysis")
-
     else:
-        model_path = MODEL_PATH_VEHICLE
-        model = YOLO(model_path, task="detect")
-        if device == "cuda":
-            model.to(device)
+        # Default to vehicle model for congestion, flow, vehicle
+        print(f"[+] {name}: Loading Vehicle Analytics pipeline (Mode: {active_mode})")
+        model = YOLO(MODEL_PATH_VEHICLE, task="detect")
+        if device == "cuda": model.to(device)
 
         target_classes = [3, 4, 5, 7, 8, 9]
         CLASS_NAMES = {3: "car", 4: "van", 5: "truck", 7: "bus", 8: "motor", 9: "bicycle"}
-        conf_thresh = 0.15
+        conf_thresh = VEHICLE_CONF_THRESH
         tracker = sv.ByteTrack(
             frame_rate=int(src_fps),
-            track_activation_threshold=0.35,
-            lost_track_buffer=30,
-            minimum_matching_threshold=0.8,
-            minimum_consecutive_frames=4,
+            track_activation_threshold=TRACK_ACTIVATION_THRESHOLD,
+            lost_track_buffer=TRACK_LOST_BUFFER,
+            minimum_matching_threshold=TRACK_MATCH_THRESHOLD,
+            minimum_consecutive_frames=TRACK_MIN_CONSEC,
         )
         trail_renderer = TrailRenderer(max_len=15)
         heatmap_renderer = HeatmapRenderer(max_len=8)
         full_heatmap_renderer = FullHeatmapRenderer()
         bbox_smoother = BboxSmoother(alpha=BBOX_SMOOTH_ALPHA)
-        crowd_analytics = None
         analytics = AnalyticsState(w, h, src_fps, CLASS_NAMES)
-        print(f"[+] {name}: YOLO vehicle detection model loaded with ByteTrack")
 
     # Stop loader thread
     model_loading.clear()
     loader_thread.join(timeout=2.0)
-    print(f"[+] {name}: ready for inference")
+    print(f"[+] {name}: ready for inference (Style: {active_mode})")
 
     last_metrics_time = time.time()
     frame_count = 0
+    started_signaled = False
 
     fps_times = []
     actual_fps = 0.0
@@ -758,7 +827,8 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
             if elapsed > 0:
                 actual_fps = (len(fps_times) - 1) / elapsed
 
-        if frame_start - last_overlay_check > 0.05:
+        # Reduced overlay polling from 50ms to 200ms for better performance
+        if frame_start - last_overlay_check > 0.2:
             last_overlay_check = frame_start
             try:
                 if name in overlay_dict:
@@ -771,16 +841,6 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
                             "trails": raw.get("trails", True),
                             "bboxes": raw.get("bboxes", True),
                             "confidence": raw.get("confidence", conf_thresh),
-                            "bbox_label": str(raw.get("bbox_label", "speed")),
-                        }
-                    else:
-                        cached_overlay = {
-                            "heatmap": bool(raw.get("heatmap", True)),
-                            "heatmap_full": bool(raw.get("heatmap_full", raw.get("heatmap", True))),
-                            "heatmap_trails": bool(raw.get("heatmap_trails", raw.get("heatmap", True))),
-                            "trails": bool(raw.get("trails", True)),
-                            "bboxes": bool(raw.get("bboxes", True)),
-                            "confidence": float(raw.get("confidence", conf_thresh)),
                             "bbox_label": str(raw.get("bbox_label", "speed")),
                         }
             except Exception:
@@ -861,6 +921,7 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
             ccn_heatmap = None
 
         now = time.time()
+        # Compute metrics every 200ms (hot regions throttled internally to 1s)
         if now - last_metrics_time >= 0.2:
             if is_crowd:
                 if ccn_density is None:
@@ -871,19 +932,20 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
             metrics["fps"] = round(actual_fps, 1)
             try:
                 if not m_q.full():
+                    if not started_signaled:
+                        metrics["__started__"] = True
+                        started_signaled = True
                     m_q.put_nowait((name, metrics))
             except:
                 pass
             last_metrics_time = now
-
-            congestion = metrics.get("congestion_index", 0)
-            if congestion >= CONGESTION_ALERT_THRESHOLD:
-                try:
-                    _, screenshot_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                    if not a_q.full():
-                        a_q.put_nowait((name, congestion, metrics, screenshot_buf.tobytes()))
-                except:
-                    pass
+            # if congestion >= CONGESTION_ALERT_THRESHOLD:
+            #     try:
+            #         _, screenshot_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            #         if not a_q.full():
+            #             a_q.put_nowait((name, congestion, metrics, screenshot_buf.tobytes()))
+            #     except:
+            #         pass
 
         # Send raw frame (before overlays) for SAM forensics
         ret_raw, raw_buf = cv2.imencode(".jpg", frame, encode_params)
@@ -922,7 +984,17 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
                 class_ids = tracked.class_id
 
                 for i in range(len(tids)):
-                    x1, y1, x2, y2 = map(int, smoothed_xyxy[i])
+                    # Get smoothed coordinates
+                    sx1, sy1, sx2, sy2 = smoothed_xyxy[i]
+                    
+                    # Apply a small expansion padding (5%) to "cover the object properly"
+                    pw = (sx2 - sx1) * 0.05
+                    ph = (sy2 - sy1) * 0.05
+                    x1 = int(max(0, sx1 - pw))
+                    y1 = int(max(0, sy1 - ph))
+                    x2 = int(min(out.shape[1], sx2 + pw))
+                    y2 = int(min(out.shape[0], sy2 + ph))
+
                     tid = tids[i]
 
                     # Determine speed for color coding
@@ -961,6 +1033,16 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
             except:
                 pass
 
+            # [Alert Logic] using cached metrics and processed frame
+            if analytics and 'metrics' in locals():
+                cong_idx = metrics.get("congestion_index", 0)
+                if cong_idx >= CONGESTION_ALERT_THRESHOLD:
+                    try:
+                        if not a_q.full():
+                            a_q.put_nowait((name, cong_idx, metrics, buffer.tobytes()))
+                    except:
+                        pass
+
     cap.release()
     gc.collect()
     if device == "cuda":
@@ -980,47 +1062,87 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
 
     # 1. Open file and push raw frames instantly
-    cap = cv2.VideoCapture(file_path)
+    cap = create_file_capture(file_path)
     if not cap.isOpened():
         print(f"[!] Failed to open uploaded file: {file_path}")
         return
 
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    src_fps = cap.get(cv2.CAP_PROP_FPS) or 25
+    src_fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    if not src_fps or src_fps < 5:
+        src_fps = TARGET_FPS
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    # Push raw frames while model loads
-    print(f"[+] {name}: streaming raw frames while model loads...")
-    for _ in range(6):
-        if stop_event.is_set():
-            break
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            break
-        ret_enc, buffer = cv2.imencode(".jpg", frame, encode_params)
-        if ret_enc:
-            try:
-                if f_q.full():
-                    try: f_q.get_nowait()
-                    except: pass
-                f_q.put_nowait((name, buffer.tobytes()))
-            except: pass
+    # Determine model to load based on active_mode
+    active_mode = None
+    try:
+        conf = overlay_dict.get(name)
+        if hasattr(conf, 'get'):
+            active_mode = conf.get("active_mode")
+    except:
+        pass
 
-    # 2. Load model
-    device = "cpu"
-    half_precision = False
-    if torch.cuda.is_available():
+    if active_mode == "forensics":
+        print(f"[!] {name}: Forensics (upload) mode active. Bypassing YOLO models.")
+        # For forensic uploads, we process exactly once and then mark as finished
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        while cap.isOpened() and not stop_event.is_set():
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                break
+            
+            # Relay raw frames for SAM
+            ret_enc, buffer = cv2.imencode(".jpg", frame, encode_params)
+            if ret_enc:
+                data = buffer.tobytes()
+                try:
+                    if f_q.full(): f_q.get_nowait()
+                    f_q.put_nowait((name, data))
+                except: pass
+                try:
+                    if rf_q.full(): rf_q.get_nowait()
+                    rf_q.put_nowait((name, data))
+                except: pass
+            
+            # Use PROCESSED_FPS for the relay speed
+            time.sleep(1.0 / PROCESSED_FPS)
+        
+        # Mark as finished so the user knows they can generate the report
+        try:
+            m_q.put_nowait((name, {"__finished__": True}))
+        except: pass
+        print(f"[!] {name}: Forensics upload analysis pass complete.")
+        cap.release()
+        return
+
+    # Load model dynamically
+    import torch
+    from ultralytics import YOLO
+    import supervision as sv
+
+    require_cuda = os.environ.get("IRIS_REQUIRE_CUDA", "0") == "1"
+    cuda_available = torch.cuda.is_available()
+    if require_cuda and not cuda_available:
+        print(f"[ERROR] {name}: CUDA required but not available. Exiting upload inference.")
+        cap.release()
+        return
+
+    device = "cuda" if cuda_available else "cpu"
+    half_precision = False # Initialize half_precision here
+    if device == "cuda":
         torch.cuda.empty_cache()
         torch.cuda.set_per_process_memory_fraction(gpu_fraction)
-        device = "cuda"
-        half_precision = True
         torch.backends.cudnn.benchmark = True
+        half_precision = True # Set half_precision if CUDA is available
+        try:
+            print(f"[CUDA] {name}: device={torch.cuda.get_device_name(0)} mem={torch.cuda.get_device_properties(0).total_memory // (1024**2)}MB")
+        except Exception as e:
+            print(f"[CUDA] {name}: device info unavailable ({e})")
+    else:
+        print(f"[CUDA] {name}: CUDA not available, using CPU")
 
-    use_ccn = is_crowd and USE_CCN_FOR_CROWD
-    ccn_counter = None
     model = None
-
     tracker = None
     trail_renderer = None
     heatmap_renderer = None
@@ -1028,62 +1150,79 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
     bbox_smoother = None
     crowd_analytics = None
     analytics = None
+    ccn_counter = None
+    
+    is_crowd = (active_mode == "crowd")
+    use_ccn = is_crowd and USE_CCN_FOR_CROWD
+    
+    # Variables for crowd mode
+    last_ccn_time = 0.0
+    ccn_interval = 1.0 / 5.0
+    cached_ccn_result = None
 
-    if is_crowd:
-        model_path = MODEL_PATH_CROWD_YOLO
-        model = YOLO(model_path, task="detect")
-        if device == "cuda":
-            model.to(device)
-
+    if active_mode == "crowd":
+        print(f"[+] {name}: Loading Crowd Analytics pipeline (Upload, Mode: {active_mode})")
+        model = YOLO(MODEL_PATH_CROWD_YOLO, task="detect")
+        if device == "cuda": model.to(device)
+        
         target_classes = [0]
         CLASS_NAMES = {0: "head"}
         conf_thresh = 0.25
-        tracker = None
-        trail_renderer = None
         heatmap_renderer = CrowdHeatmapRenderer(accumulate_frames=8)
-        bbox_smoother = None
         crowd_analytics = CrowdAnalyticsState(w, h, src_fps)
-        analytics = None
-
-        last_ccn_time = 0.0
-        ccn_interval = 1.0 / 5.0
-        cached_ccn_result = None
-
-        if use_ccn:
-            ccn_counter = CrowdCounter(MODEL_PATH_CROWD_CCN, device)
-            print(f"[+] {name}: CCN crowd counting model loaded")
-
-        print(f"[+] {name}: YOLO head detection model loaded for crowd analysis")
-
+        use_ccn = USE_CCN_FOR_CROWD # Set use_ccn for crowd mode
     else:
-        model_path = MODEL_PATH_VEHICLE
-        model = YOLO(model_path, task="detect")
-        if device == "cuda":
-            model.to(device)
+        # Default to vehicle model
+        print(f"[+] {name}: Loading Vehicle Analytics pipeline (Upload, Mode: {active_mode if active_mode else 'default'})")
+        model = YOLO(MODEL_PATH_VEHICLE, task="detect")
+        if device == "cuda": model.to(device)
 
         target_classes = [3, 4, 5, 7, 8, 9]
         CLASS_NAMES = {3: "car", 4: "van", 5: "truck", 7: "bus", 8: "motor", 9: "bicycle"}
         conf_thresh = 0.25
         tracker = sv.ByteTrack(
             frame_rate=int(src_fps),
-            track_activation_threshold=0.35,
-            lost_track_buffer=30,
-            minimum_matching_threshold=0.8,
-            minimum_consecutive_frames=4,
+            track_activation_threshold=0.25,
+            lost_track_buffer=60,
+            minimum_matching_threshold=0.5,
+            minimum_consecutive_frames=2,
         )
         trail_renderer = TrailRenderer(max_len=15)
         heatmap_renderer = HeatmapRenderer(max_len=8)
         full_heatmap_renderer = FullHeatmapRenderer()
         bbox_smoother = BboxSmoother(alpha=BBOX_SMOOTH_ALPHA)
-        crowd_analytics = None
         analytics = AnalyticsState(w, h, src_fps, CLASS_NAMES)
-        print(f"[+] {name}: YOLO vehicle detection model loaded with ByteTrack")
+
+    # Launch raw viewer thread for uploads so the user doesn't wait for the AI to load.
+    model_loading = threading.Event()
+    model_loading.set()
+    l_cap = create_file_capture(file_path)
+    loader_thread = threading.Thread(
+        target=raw_loader_worker,
+        args=(l_cap, stop_event, model_loading, name, f_q, rf_q, encode_params),
+        daemon=True,
+    )
+    loader_thread.start()
+
+    if active_mode == "crowd" and USE_CCN_FOR_CROWD:
+        from crowd import CrowdCounter
+        ccn_counter = CrowdCounter(MODEL_PATH_CROWD_CCN, device)
+        print(f"[+] {name}: CCN crowd counting model loaded")
+
+    print(f"[+] {name}: Model loaded, ready for upload processing")
+
+    # [CRITICAL] Stop loader thread once AI is ready to avoid dual-reader jitter
+    model_loading.clear()
+    loader_thread.join(timeout=2.0)
+    if l_cap: l_cap.release()
+
 
     last_metrics_time = time.time()
 
     frame_interval = 1.0 / src_fps
     fps_times = []
     actual_fps = 0.0
+    started_signaled = False
 
     cached_overlay = {
         "heatmap": True,
@@ -1100,13 +1239,14 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
 
         ret, frame = cap.read()
         if not ret:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            if not use_ccn:
-                tracker = sv.ByteTrack(frame_rate=int(src_fps))
-                trail_renderer = TrailRenderer(max_len=15)
-            heatmap_renderer = HeatmapRenderer(max_len=8)
-            full_heatmap_renderer = FullHeatmapRenderer()
-            continue
+            # Video finished — send completion signal and stop
+            try:
+                if not m_q.full():
+                    m_q.put_nowait((name, {"__finished__": True}))
+            except:
+                pass
+            print(f"[+] Upload video finished: {name}")
+            break
 
         out = frame.copy()
 
@@ -1118,7 +1258,8 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
             if elapsed > 0:
                 actual_fps = (len(fps_times) - 1) / elapsed
 
-        if frame_start - last_overlay_check > 0.05:
+        # Reduced overlay polling from 50ms to 200ms for better performance
+        if frame_start - last_overlay_check > 0.2:
             last_overlay_check = frame_start
             try:
                 if name in overlay_dict:
@@ -1131,16 +1272,6 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
                             "trails": raw.get("trails", True),
                             "bboxes": raw.get("bboxes", True),
                             "confidence": raw.get("confidence", conf_thresh),
-                            "bbox_label": str(raw.get("bbox_label", "speed")),
-                        }
-                    else:
-                        cached_overlay = {
-                            "heatmap": bool(raw.get("heatmap", True)),
-                            "heatmap_full": bool(raw.get("heatmap_full", raw.get("heatmap", True))),
-                            "heatmap_trails": bool(raw.get("heatmap_trails", raw.get("heatmap", True))),
-                            "trails": bool(raw.get("trails", True)),
-                            "bboxes": bool(raw.get("bboxes", True)),
-                            "confidence": float(raw.get("confidence", conf_thresh)),
                             "bbox_label": str(raw.get("bbox_label", "speed")),
                         }
             except Exception:
@@ -1264,6 +1395,9 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
                 if analytics:
                     metrics = analytics.update(tracked)
                     metrics["fps"] = round(actual_fps, 1)
+                    if not started_signaled:
+                        metrics["__started__"] = True
+                        started_signaled = True
                     try:
                         if not m_q.full():
                             m_q.put_nowait((name, metrics))
@@ -1283,6 +1417,16 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
                 f_q.put_nowait((name, buffer.tobytes()))
             except:
                 pass
+
+            # [Alert Logic] For uploads
+            if analytics and 'metrics' in locals():
+                cong_idx = metrics.get("congestion_index", 0)
+                if cong_idx >= CONGESTION_ALERT_THRESHOLD:
+                    try:
+                        if not a_q.full():
+                            a_q.put_nowait((name, cong_idx, metrics, buffer.tobytes()))
+                    except:
+                        pass
 
         # Only throttle to video FPS if realtime mode is enabled
         if realtime:

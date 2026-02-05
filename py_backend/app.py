@@ -6,7 +6,7 @@ Sets up multiprocessing queues, starts the relay worker, and launches the FastAP
 import os
 import time
 import threading
-import multiprocessing as mp
+import queue
 
 from log_utils import setup_process_logging
 from server import (
@@ -17,15 +17,14 @@ from server import (
     get_overlay_state,
     add_alert,
 )
-from yolobyte import process_stream, process_upload_stream
+from shared_inference import SharedInferenceManager
 
-# Shared communication objects
-spawn_ctx = None
 frame_queue = None
 raw_frame_queue = None
 metrics_queue = None
 alert_queue = None
 overlay_shared_dict = None
+shared_inference = None
 
 
 def relay_worker(stop_event, f_q, m_q, a_q, rf_q):
@@ -73,54 +72,40 @@ def relay_worker(stop_event, f_q, m_q, a_q, rf_q):
 
 
 def start_backend(idx, url, name, overlay_config=None, active_streams=1):
-    """Spawn a new inference process for an RTSP source."""
+    """Register a new RTSP source with the shared inference manager."""
     overlay_shared_dict[name] = overlay_config if overlay_config else get_overlay_state(name)
-    stop = spawn_ctx.Event()
-    p = spawn_ctx.Process(
-        target=process_stream,
-        args=(idx, name, url, stop, frame_queue, metrics_queue, alert_queue, raw_frame_queue, overlay_shared_dict, active_streams),
-        daemon=True,
-    )
-    p.start()
-    return p, stop
+    handle = shared_inference.add_rtsp_stream(idx, name, url, overlay_config)
+    if handle is None:
+        return None, None
+    return handle, handle._stop_event
 
 
 def start_upload_backend(file_path, name, overlay_config=None, is_crowd=False, active_streams=1, realtime=False):
-    """Start inference on an uploaded video file."""
+    """Register an uploaded video with the shared inference manager."""
     overlay_shared_dict[name] = overlay_config if overlay_config else get_overlay_state(name)
-    stop = spawn_ctx.Event()
-    p = spawn_ctx.Process(
-        target=process_upload_stream,
-        args=(name, file_path, stop, frame_queue, metrics_queue, alert_queue, raw_frame_queue, overlay_shared_dict, is_crowd, active_streams, realtime),
-        daemon=True,
-    )
-    p.start()
-    return p, stop
+    handle = shared_inference.add_upload_stream(file_path, name, overlay_config, is_crowd=is_crowd, realtime=realtime)
+    if handle is None:
+        return None, None
+    return handle, handle._stop_event
 
 
 def main():
-    global spawn_ctx, overlay_shared_dict, frame_queue, raw_frame_queue, metrics_queue, alert_queue
+    global overlay_shared_dict, frame_queue, raw_frame_queue, metrics_queue, alert_queue, shared_inference
     setup_process_logging("backend")
 
-    # CUDA requires non-fork start method to avoid "Cannot re-initialize CUDA in forked subprocess"
-    # Try forkserver first (works with CUDA, fewer SemLock issues), then spawn
-    # Allow override via IRIS_MP_START_METHOD=spawn|fork|forkserver.
-    available = mp.get_all_start_methods()
-    default_method = "forkserver" if "forkserver" in available else "spawn"
-    method = os.environ.get("IRIS_MP_START_METHOD", default_method)
-    if method not in available:
-        method = default_method
+    overlay_shared_dict = {}
+    frame_queue = queue.Queue(maxsize=60)
+    raw_frame_queue = queue.Queue(maxsize=30)
+    metrics_queue = queue.Queue(maxsize=10)
+    alert_queue = queue.Queue(maxsize=10)
 
-    print(f"[MP] Using multiprocessing start method: {method}")
-    ctx = mp.get_context(method)
-    spawn_ctx = ctx
-
-    manager = ctx.Manager()
-    overlay_shared_dict = manager.dict()
-    frame_queue = ctx.Queue(maxsize=60)
-    raw_frame_queue = ctx.Queue(maxsize=30)
-    metrics_queue = ctx.Queue(maxsize=10)
-    alert_queue = ctx.Queue(maxsize=10)
+    shared_inference = SharedInferenceManager(
+        frame_queue,
+        metrics_queue,
+        alert_queue,
+        raw_frame_queue,
+        overlay_shared_dict,
+    )
 
     stop_relay = threading.Event()
     relay_t = threading.Thread(target=relay_worker, args=(stop_relay, frame_queue, metrics_queue, alert_queue, raw_frame_queue), daemon=True)
@@ -131,6 +116,7 @@ def main():
     finally:
         stop_relay.set()
         relay_t.join(timeout=1.0)
+        shared_inference.stop()
 
 
 if __name__ == "__main__":

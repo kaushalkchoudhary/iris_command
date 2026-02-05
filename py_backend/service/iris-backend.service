@@ -15,7 +15,8 @@
 
 [Unit]
 Description=IRIS Command Video Analytics Backend
-After=network.target
+Wants=network-online.target iris-mediamtx.service
+After=network-online.target iris-mediamtx.service
 
 [Service]
 Type=simple
@@ -31,8 +32,10 @@ Environment=OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp|buffer_size;262144|
 ExecStart=/home/ubuntu/Desktop/iris_command/py_backend/service/run_backend.sh
 
 # Restart policy
-Restart=on-failure
+Restart=always
 RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=6
 
 # Logging
 StandardOutput=null
