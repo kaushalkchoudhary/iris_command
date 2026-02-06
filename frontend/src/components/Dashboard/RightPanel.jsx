@@ -114,8 +114,6 @@ const OverlayToggles = ({ selectedVideos = [], accentColor = 'cyan', useCase = '
   const [overlay, setOverlay] = useState({
     heatmap: true,
     heatmap_full: true,
-    heatmap_trails: true,
-    bboxes: false,
   });
   const [isUpdating, setIsUpdating] = useState(false);
 
@@ -129,8 +127,6 @@ const OverlayToggles = ({ selectedVideos = [], accentColor = 'cyan', useCase = '
           setOverlay({
             heatmap: data.heatmap ?? true,
             heatmap_full: data.heatmap_full ?? true,
-            heatmap_trails: data.heatmap_trails ?? true,
-            bboxes: data.bboxes ?? false,
           });
         }
       } catch (e) {}
@@ -160,13 +156,11 @@ const OverlayToggles = ({ selectedVideos = [], accentColor = 'cyan', useCase = '
     const next = !overlay[key];
     const updates = { [key]: next };
 
-    // When turning off master heatmap, turn off both types
+    // Keep full heatmap tied to master heatmap state.
     if (key === 'heatmap' && !next) {
       updates.heatmap_full = false;
-      updates.heatmap_trails = false;
     }
-    // When turning on a heatmap type, ensure master is on
-    if ((key === 'heatmap_full' || key === 'heatmap_trails') && next) {
+    if (key === 'heatmap_full' && next) {
       updates.heatmap = true;
     }
 
@@ -176,21 +170,10 @@ const OverlayToggles = ({ selectedVideos = [], accentColor = 'cyan', useCase = '
 
   if (selectedVideos.length === 0) return null;
 
-  const isCrowd = useCase === 'crowd';
-
-  // For congestion mode: Heatmap (master), Full, Per-Vehicle, Boxes
-  // For crowd mode: Heatmap, Full only
-  const toggleItems = isCrowd
-    ? [
-        { key: 'heatmap', label: 'Heatmap' },
-        { key: 'heatmap_full', label: 'Full' },
-      ]
-    : [
-        { key: 'heatmap', label: 'Heat' },
-        { key: 'heatmap_full', label: 'Full' },
-        { key: 'heatmap_trails', label: 'Trail' },
-        { key: 'bboxes', label: 'Box' },
-      ];
+  const toggleItems = [
+    { key: 'heatmap', label: 'Heatmap' },
+    { key: 'heatmap_full', label: 'Full' },
+  ];
 
   return (
     <div className="bg-black/40 border border-white/10 p-3">
@@ -201,7 +184,7 @@ const OverlayToggles = ({ selectedVideos = [], accentColor = 'cyan', useCase = '
         </div>
         {isUpdating && <Loader2 className="w-3 h-3 text-white/40 animate-spin" />}
       </div>
-      <div className={`grid gap-1.5 ${isCrowd ? 'grid-cols-2' : 'grid-cols-4'}`}>
+      <div className="grid gap-1.5 grid-cols-2">
         {toggleItems.map(t => (
           <button
             key={t.key}

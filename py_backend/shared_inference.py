@@ -40,6 +40,8 @@ MODEL_PATH_VEHICLE = "models/yolov11n-visdrone.pt"
 MODEL_PATH_CROWD_YOLO = "models/best_head.pt"
 MODEL_PATH_CROWD_CCN = "models/crowd-model.pth"
 USE_CCN_FOR_CROWD = True
+UPLOAD_INFERENCE_SIZE = int(os.environ.get("IRIS_UPLOAD_INFERENCE_SIZE", "640"))
+UPLOAD_MAX_DET = int(os.environ.get("IRIS_UPLOAD_MAX_DET", "35"))
 
 
 class ThreadHandle:
@@ -251,6 +253,9 @@ class SharedInferenceManager:
         src_fps = state.cap.get(cv2.CAP_PROP_FPS) or 0.0
         if not src_fps or src_fps < 5:
             src_fps = TARGET_FPS
+        # Upload metadata FPS can be noisy/wrong; keep a stable realtime baseline.
+        if state.is_upload and (src_fps < 24 or src_fps > 120):
+            src_fps = TARGET_FPS
         state.src_fps = src_fps
 
         if state.mode == "crowd":
@@ -269,10 +274,12 @@ class SharedInferenceManager:
                 minimum_matching_threshold=TRACK_MATCH_THRESHOLD,
                 minimum_consecutive_frames=TRACK_MIN_CONSEC,
             )
-            state.trail_renderer = TrailRenderer(max_len=15)
+            if state.mode != "congestion":
+                state.trail_renderer = TrailRenderer(max_len=15)
             state.heatmap_renderer = HeatmapRenderer(max_len=8)
             state.full_heatmap_renderer = FullHeatmapRenderer()
-            state.bbox_smoother = BboxSmoother(alpha=BBOX_SMOOTH_ALPHA)
+            if state.mode != "congestion":
+                state.bbox_smoother = BboxSmoother(alpha=BBOX_SMOOTH_ALPHA)
             state.class_names = {3: "car", 4: "van", 5: "truck", 7: "bus", 8: "motor", 9: "bicycle"}
             state.analytics = AnalyticsState(w, h, src_fps, state.class_names)
 
@@ -280,10 +287,11 @@ class SharedInferenceManager:
         # Optional FPS caps to avoid runaway decode
         rtsp_cap = float(os.environ.get("IRIS_RTSP_FPS_CAP", "0"))
         upload_cap = float(os.environ.get("IRIS_UPLOAD_FPS_CAP", "0"))
+        upload_target = float(os.environ.get("IRIS_UPLOAD_TARGET_FPS", str(TARGET_FPS)))
         cap_fps = upload_cap if state.is_upload else rtsp_cap
         if state.is_upload:
-            base_fps = state.src_fps if state.src_fps > 0 else TARGET_FPS
-            # Always throttle uploads to real-time unless a lower cap is specified
+            # Drive uploads by configured target FPS for smoother realtime cadence.
+            base_fps = upload_target if upload_target > 0 else (state.src_fps if state.src_fps > 0 else TARGET_FPS)
             cap_fps = base_fps
             if upload_cap and upload_cap > 0:
                 cap_fps = min(cap_fps, upload_cap)
@@ -327,16 +335,14 @@ class SharedInferenceManager:
                 state.first_frame_logged = True
                 print(f"[UPLOAD] {state.name}: first frame received (fps={state.src_fps:.1f}, realtime={state.realtime})")
 
-            # Push raw frame for SAM
+            # Push raw frame for low-overhead raw publishing/SAM relay.
             try:
-                ret_enc, buffer = cv2.imencode(".jpg", frame, self.encode_params)
-                if ret_enc:
-                    if self.raw_frame_queue.full():
-                        try:
-                            self.raw_frame_queue.get_nowait()
-                        except Exception:
-                            pass
-                    self.raw_frame_queue.put_nowait((state.name, buffer.tobytes()))
+                if self.raw_frame_queue.full():
+                    try:
+                        self.raw_frame_queue.get_nowait()
+                    except Exception:
+                        pass
+                self.raw_frame_queue.put_nowait((state.name, frame.copy()))
             except Exception:
                 pass
 
@@ -443,23 +449,27 @@ class SharedInferenceManager:
                 by_conf = {}
                 for state, frame, seq in vehicle_batch:
                     conf = float(state.cached_overlay.get("confidence", VEHICLE_CONF_THRESH))
-                    key = round(conf, 3)
-                    by_conf.setdefault(key, []).append((state, frame, seq, conf))
+                    imgsz = UPLOAD_INFERENCE_SIZE if state.is_upload else INFERENCE_SIZE
+                    max_det = UPLOAD_MAX_DET if state.is_upload else MAX_DET
+                    key = (round(conf, 3), int(imgsz), int(max_det))
+                    by_conf.setdefault(key, []).append((state, frame, seq, conf, imgsz, max_det))
 
                 for _, items in by_conf.items():
-                    frames = [f for _, f, _, _ in items]
+                    frames = [f for _, f, _, _, _, _ in items]
                     conf = items[0][3]
+                    imgsz = items[0][4]
+                    max_det = items[0][5]
                     results = self.vehicle_model.predict(
                         frames,
-                        imgsz=INFERENCE_SIZE,
+                        imgsz=imgsz,
                         conf=conf,
-                        max_det=MAX_DET,
+                        max_det=max_det,
                         verbose=False,
                         classes=[3, 4, 5, 7, 8, 9],
                         half=self.half_precision and self.device == "cuda",
                         device=self.device,
                     )
-                    for (state, frame, seq, _), res in zip(items, results):
+                    for (state, frame, seq, _, _, _), res in zip(items, results):
                         self._process_vehicle_frame(state, frame, res, sv)
                         state.last_processed_seq = seq
 
@@ -467,23 +477,27 @@ class SharedInferenceManager:
                 by_conf = {}
                 for state, frame, seq in crowd_batch:
                     conf = float(state.cached_overlay.get("confidence", CROWD_CONF_THRESH))
-                    key = round(conf, 3)
-                    by_conf.setdefault(key, []).append((state, frame, seq, conf))
+                    imgsz = UPLOAD_INFERENCE_SIZE if state.is_upload else INFERENCE_SIZE
+                    max_det = UPLOAD_MAX_DET if state.is_upload else MAX_DET
+                    key = (round(conf, 3), int(imgsz), int(max_det))
+                    by_conf.setdefault(key, []).append((state, frame, seq, conf, imgsz, max_det))
 
                 for _, items in by_conf.items():
-                    frames = [f for _, f, _, _ in items]
+                    frames = [f for _, f, _, _, _, _ in items]
                     conf = items[0][3]
+                    imgsz = items[0][4]
+                    max_det = items[0][5]
                     results = self.crowd_model.predict(
                         frames,
-                        imgsz=INFERENCE_SIZE,
+                        imgsz=imgsz,
                         conf=conf,
-                        max_det=MAX_DET,
+                        max_det=max_det,
                         verbose=False,
                         classes=[0],
                         half=self.half_precision and self.device == "cuda",
                         device=self.device,
                     )
-                    for (state, frame, seq, _), res in zip(items, results):
+                    for (state, frame, seq, _, _, _), res in zip(items, results):
                         self._process_crowd_frame(state, frame, res, sv)
                         state.last_processed_seq = seq
 
@@ -491,32 +505,36 @@ class SharedInferenceManager:
         now = time.time()
         self._refresh_overlay(state, now)
         overlay = state.cached_overlay
-        current_conf = overlay.get("confidence", VEHICLE_CONF_THRESH)
+        mode = state.mode or overlay.get("active_mode")
+        is_congestion_mode = mode == "congestion"
+        trails_enabled = bool(overlay.get("trails", True)) and not is_congestion_mode
+        heatmap_trails_enabled = bool(overlay.get("heatmap_trails", overlay.get("heatmap", True))) and not is_congestion_mode
+        bboxes_enabled = bool(overlay.get("bboxes", True)) and not is_congestion_mode
 
         detections = sv.Detections.from_ultralytics(result)
         tracked = state.tracker.update_with_detections(detections) if state.tracker else detections
         smoothed_xyxy = None
-        if tracked is not None and tracked.tracker_id is not None and state.bbox_smoother:
+        if bboxes_enabled and tracked is not None and tracked.tracker_id is not None and state.bbox_smoother:
             smoothed_xyxy = state.bbox_smoother.smooth(tracked)
             if smoothed_xyxy is not None:
                 tracked.xyxy = smoothed_xyxy
 
         out = frame.copy()
-        current_ids = state.trail_renderer.update(tracked) if state.trail_renderer else set()
+        current_ids = state.trail_renderer.update(tracked) if trails_enabled and state.trail_renderer else set()
 
-        if state.heatmap_renderer:
+        if heatmap_trails_enabled and state.heatmap_renderer:
             state.heatmap_renderer.update(tracked)
         if state.full_heatmap_renderer:
             state.full_heatmap_renderer.update(tracked, frame.shape)
 
         if overlay.get("heatmap_full", overlay.get("heatmap", True)) and state.full_heatmap_renderer:
             state.full_heatmap_renderer.render(out)
-        if overlay.get("heatmap_trails", overlay.get("heatmap", True)) and state.heatmap_renderer:
+        if heatmap_trails_enabled and state.heatmap_renderer:
             state.heatmap_renderer.render(out, current_ids)
-        if overlay.get("trails", True) and state.trail_renderer:
+        if trails_enabled and state.trail_renderer:
             state.trail_renderer.render(out, current_ids)
 
-        if overlay.get("bboxes", True) and tracked is not None and tracked.tracker_id is not None:
+        if bboxes_enabled and tracked is not None and tracked.tracker_id is not None:
             _SPEED_LABELS = {0: "STALLED", 1: "SLOW", 2: "MEDIUM", 3: "FAST"}
             _SPEED_COLORS = {
                 0: (0, 0, 220),

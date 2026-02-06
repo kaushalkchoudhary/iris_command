@@ -94,7 +94,6 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh, useCas
   const toggleVideo = async (video) => {
     const active = selectedVideos.some(v => v.id === video.id);
     if (active) {
-      if (selectedVideos.length === 1) return;
       onVideosChange(selectedVideos.filter(v => v.id !== video.id));
       try {
         await fetch(`${API_BASE_URL}/sources/stop`, {
@@ -200,7 +199,6 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh, useCas
     };
     const active = selectedVideos.some(v => v.id === upload.name);
     if (active) {
-      if (selectedVideos.length === 1) return;
       onVideosChange(selectedVideos.filter(v => v.id !== upload.name));
     } else {
       // Restart the upload inference on backend before showing it
@@ -215,7 +213,7 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh, useCas
 
   /* ── RENDER ── */
   return (
-    <div className="w-full min-h-[2.25rem] max-h-[2.75rem] bg-black/60 backdrop-blur-md border-t border-white/10 flex items-center justify-between px-2 sm:px-3 md:px-5 z-50 font-mono shrink-0 gap-2">
+    <div className="w-full bg-black/60 backdrop-blur-md border-t border-white/10 flex flex-wrap sm:flex-nowrap items-center justify-between px-2 sm:px-3 md:px-5 py-1 z-50 font-mono shrink-0 gap-2">
 
       {/* LEFT — Status */}
       <div className="flex items-center gap-2 sm:gap-3 md:gap-4 shrink-0">
@@ -332,7 +330,7 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh, useCas
       </div>
 
       {/* RIGHT — Branding */}
-      <div className="flex items-center shrink-0">
+      <div className="flex items-center shrink-0 ml-auto sm:ml-0">
         <span className="text-[8px] sm:text-[9px] md:text-[10px] text-white/20 tracking-widest whitespace-nowrap">IRIS <span className="hidden sm:inline">COMMAND </span>v1.0</span>
       </div>
     </div>

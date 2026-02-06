@@ -8,6 +8,7 @@ import Footer from './components/Dashboard/Footer';
 import IRISLoader from './components/Dashboard/IRISLoader';
 import WelcomeScreen from './components/Dashboard/WelcomeScreen';
 import Login from './Login';
+import HLSVideo from './components/UI/HLSVideo';
 import { API_BASE_URL, WEBRTC_BASE, HLS_BASE } from './config';
 
 // ── MODE CONFIGURATION ──
@@ -431,12 +432,10 @@ const useWebRTC = (streamName, enabled = true, options = {}) => {
 const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics }) => {
   const [isCellLoading, setIsCellLoading] = useState(true);
   const [rawPlaying, setRawPlaying] = useState(false);
-  const [rawStalled, setRawStalled] = useState(false);
+  const [rawHlsPlaying, setRawHlsPlaying] = useState(false);
   const [processedPlaying, setProcessedPlaying] = useState(false);
   const [samResult, setSamResult] = useState(null);
   const [reportLoading, setReportLoading] = useState(false);
-  const rawTimeRef = useRef(0);
-  const rawStalledRef = useRef(false);
 
   const handleGenerateReport = async () => {
     if (reportLoading) return;
@@ -465,33 +464,24 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
   // Finished flag disabled for uploads (avoid premature completion UI)
   const [isFinished, setIsFinished] = useState(false);
   const [hadAnyFrame, setHadAnyFrame] = useState(false);
-  const [uploadRawSeen, setUploadRawSeen] = useState(false);
-  const [uploadRawGraceExpired, setUploadRawGraceExpired] = useState(false);
   useEffect(() => {
     if (isUpload) {
       setIsFinished(false);
     }
   }, [isUpload, video.id]);
 
-  // For uploads: give raw MJPEG a short grace window to appear before switching to processed
-  useEffect(() => {
-    if (!isUpload) return;
-    setUploadRawSeen(false);
-    setUploadRawGraceExpired(false);
-    const t = setTimeout(() => setUploadRawGraceExpired(true), 1200);
-    return () => clearTimeout(t);
-  }, [isUpload, video.id]);
-
-  // Phase 1: instant raw RTSP via WebRTC (skip for uploads — no raw source exists)
+  // Phase 1: instant raw RTSP via WebRTC (RTSP only).
   const { videoRef: rawVideoRef, connected: rawConnected } = useWebRTC(video.id, !isUpload && !isFinished);
   const rawMjpegUrl = `${API_BASE_URL}/raw/${video.id}`;
+  const rawUploadHlsUrl = `${HLS_BASE}/${video.id}/index.m3u8`;
 
   // Phase 2: processed feed via WebRTC (libx264 baseline → RTSP → MediaMTX → WebRTC)
   const processedStreamName = `processed_${video.id}`;
   const isForensics = useCase === 'forensics';
+  const isCongestion = useCase === 'congestion';
   const { videoRef: processedVideoRef, connected: processedConnected } = useWebRTC(
     processedStreamName,
-    (isUpload || !isForensics) && !isFinished,  // Stop attempting WebRTC if finished
+    (isUpload || !isForensics) && !isFinished,
     {
       initialDelayMs: 2000,
       retryDelayMs: 3000,
@@ -499,10 +489,19 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
     }
   );
 
+  // Prevent stale play-state from hiding all layers after mode/source switches.
+  useEffect(() => {
+    setRawPlaying(false);
+    setRawHlsPlaying(false);
+    setProcessedPlaying(false);
+    setHadAnyFrame(false);
+    setIsCellLoading(true);
+  }, [video.id, useCase, isUpload]);
+
   // Hide loader once video is rendering — brief delay to show "FEED LOCKED" state
   useEffect(() => {
     if (isFinished) return;
-    const isReady = isUpload ? processedPlaying : rawPlaying;
+    const isReady = isUpload ? (rawPlaying || processedPlaying) : rawPlaying;
     if (!isReady) return;
     const timer = setTimeout(() => setIsCellLoading(false), 600);
     return () => clearTimeout(timer);
@@ -542,39 +541,16 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
   // Ideally, valid cleanup on backend keeps the stream available or we just accept the "finished" UI state.
   const showProcessed = (processedPlaying || isFinished) && (isUpload || !isForensics) && !showForensicsResult;
   const showRawMjpeg = isUpload
-    ? (!showForensicsResult && (!processedPlaying || (!uploadRawSeen && !uploadRawGraceExpired)))
-    : (!rawPlaying || rawStalled);
-
-  const setRawStalledSafe = (value) => {
-    rawStalledRef.current = value;
-    setRawStalled(value);
-  };
-
-  // Detect stalled raw WebRTC feed and fall back to MJPEG until processed is ready.
-  useEffect(() => {
-    if (isUpload || isFinished || !rawPlaying || showProcessed || showForensicsResult) return;
-    let last = rawTimeRef.current;
-    const timer = setInterval(() => {
-      const vid = rawVideoRef.current;
-      if (!vid) return;
-      const now = vid.currentTime;
-      if (now === last) {
-        if (!rawStalledRef.current) setRawStalledSafe(true);
-      } else {
-        last = now;
-        if (rawStalledRef.current) setRawStalledSafe(false);
-      }
-    }, 1500);
-    return () => clearInterval(timer);
-  }, [isUpload, isFinished, rawPlaying, showProcessed, showForensicsResult]);
+    ? (!showForensicsResult && !processedPlaying)
+    : !rawPlaying;
 
   return (
     <div className={`relative overflow-hidden group ${getVideoClass(index, total)}`}>
       <AnimatePresence>
         {isCellLoading && !isFinished && (
           <IRISLoader
-            connected={isUpload ? processedConnected : rawConnected}
-            ready={isUpload ? processedPlaying : rawPlaying}
+            connected={isUpload ? (rawPlaying || processedConnected) : rawConnected}
+            ready={isUpload ? (rawPlaying || processedPlaying) : rawPlaying}
           />
         )}
       </AnimatePresence>
@@ -602,17 +578,46 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
       </div>
 
       {/* Layer 0: MJPEG raw fallback — fastest to appear */}
-      <img
-        src={rawMjpegUrl}
-        alt="IRIS Raw MJPEG"
-        onLoad={() => { setRawPlaying(true); setHadAnyFrame(true); setUploadRawSeen(true); }}
-        className="absolute inset-0 w-full h-full object-cover"
-        style={{
-          ...maskStyle,
-          opacity: (showRawMjpeg && !showProcessed && !showForensicsResult) ? 1 : 0,
-          transition: 'opacity 0.5s ease',
-        }}
-      />
+      {isUpload ? (
+        <>
+          <div
+            className="absolute inset-0"
+            style={{
+              opacity: (showRawMjpeg && !showProcessed && !showForensicsResult) ? 1 : 0,
+              transition: 'opacity 0.5s ease',
+            }}
+          >
+            <HLSVideo
+              src={rawUploadHlsUrl}
+              onPlaying={() => { setRawHlsPlaying(true); setRawPlaying(true); setHadAnyFrame(true); }}
+              className="absolute inset-0 w-full h-full object-cover"
+            />
+          </div>
+          <img
+            src={rawMjpegUrl}
+            alt="IRIS Raw MJPEG"
+            onLoad={() => { setRawPlaying(true); setHadAnyFrame(true); }}
+            className="absolute inset-0 w-full h-full object-cover"
+            style={{
+              ...maskStyle,
+              opacity: (showRawMjpeg && !showProcessed && !showForensicsResult && !rawHlsPlaying) ? 1 : 0,
+              transition: 'opacity 0.5s ease',
+            }}
+          />
+        </>
+      ) : (
+        <img
+          src={rawMjpegUrl}
+          alt="IRIS Raw MJPEG"
+          onLoad={() => { setRawPlaying(true); setHadAnyFrame(true); }}
+          className="absolute inset-0 w-full h-full object-cover"
+          style={{
+            ...maskStyle,
+            opacity: (showRawMjpeg && !showProcessed && !showForensicsResult) ? 1 : 0,
+            transition: 'opacity 0.5s ease',
+          }}
+        />
+      )}
 
       {/* Layer 1: WebRTC raw RTSP — instant, always underneath (hidden for uploads) */}
       {!isUpload && (
@@ -621,23 +626,17 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
           autoPlay
           playsInline
           muted
-          onPlaying={() => { setRawPlaying(true); setRawStalledSafe(false); }}
-          onTimeUpdate={(e) => { rawTimeRef.current = e.currentTarget.currentTime; }}
-          onWaiting={() => setRawStalledSafe(true)}
-          onStalled={() => setRawStalledSafe(true)}
-          onPause={() => setRawStalledSafe(true)}
-          onEnded={() => setRawStalledSafe(true)}
-          onError={() => setRawStalledSafe(true)}
+          onPlaying={() => { setRawPlaying(true); setHadAnyFrame(true); }}
           className="absolute inset-0 w-full h-full object-cover"
           style={{
             ...maskStyle,
-            opacity: isCellLoading ? 0 : (showProcessed || showForensicsResult || rawStalled) ? 0 : 1,
+            opacity: isCellLoading ? 0 : (showProcessed || showForensicsResult) ? 0 : 1,
             transition: isCellLoading ? 'none' : 'opacity 0.5s ease',
           }}
         />
       )}
 
-      {/* Layer 2: WebRTC processed stream — fades in once connected (primary layer for uploads) */}
+      {/* Layer 2: WebRTC processed stream */}
       {(isUpload || !isForensics) && (
         <video
           ref={processedVideoRef}

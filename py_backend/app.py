@@ -28,7 +28,7 @@ shared_inference = None
 
 
 def relay_worker(stop_event, f_q, m_q, a_q, rf_q):
-    """Relay metrics, frames, raw frames, and alerts from multiprocess queues to control server."""
+    """Relay metrics, frames, raw frames, and alerts from local queues to control server."""
     while not stop_event.is_set():
         try:
             for _ in range(60):
@@ -39,7 +39,7 @@ def relay_worker(stop_event, f_q, m_q, a_q, rf_q):
         except:
             pass
 
-        # Relay raw frames for SAM
+        # Relay raw BGR frames; server encodes JPEG once for SAM/MJPEG consumers.
         try:
             for _ in range(60):
                 if rf_q.empty():
@@ -106,6 +106,8 @@ def main():
         raw_frame_queue,
         overlay_shared_dict,
     )
+    # Warm models once at startup to reduce first-stream processed delay.
+    shared_inference.start()
 
     stop_relay = threading.Event()
     relay_t = threading.Thread(target=relay_worker, args=(stop_relay, frame_queue, metrics_queue, alert_queue, raw_frame_queue), daemon=True)

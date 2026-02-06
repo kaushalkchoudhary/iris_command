@@ -71,20 +71,20 @@ const HLSVideo = ({ src, fallbackSrc, className = '', ...props }) => {
     if (isHlsSource && Hls.isSupported()) {
       const hls = new Hls({
         enableWorker: true,
-        lowLatencyMode: false,
+        lowLatencyMode: true,
 
-        backBufferLength: 90,
-        maxBufferLength: 30,
-        maxMaxBufferLength: 60,
+        backBufferLength: 12,
+        maxBufferLength: 6,
+        maxMaxBufferLength: 10,
 
-        liveSyncDurationCount: 3,
-        liveMaxLatencyDurationCount: 8,
+        liveSyncDurationCount: 1,
+        liveMaxLatencyDurationCount: 3,
 
-        abrEwmaFastLive: 3,
-        abrEwmaSlowLive: 9,
+        abrEwmaFastLive: 2,
+        abrEwmaSlowLive: 6,
 
-        maxStarvationDelay: 4,
-        maxLoadingDelay: 4,
+        maxStarvationDelay: 2,
+        maxLoadingDelay: 2,
       });
 
       hlsRef.current = hls;

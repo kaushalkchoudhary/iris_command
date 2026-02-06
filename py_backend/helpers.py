@@ -52,7 +52,8 @@ def get_dynamic_gpu_fraction(active_streams: int) -> float:
         return 0.15  # 6+ streams: 15% each (may need to queue)
 
 GPU_DECODE_DEFAULT = os.environ.get("IRIS_GPU_DECODE", "1") == "1"
-GPU_DECODE_UPLOADS = os.environ.get("IRIS_GPU_DECODE_UPLOADS", "1") == "1"
+# Upload decode defaults to CPU to keep GPU focused on inference/processed path.
+GPU_DECODE_UPLOADS = os.environ.get("IRIS_GPU_DECODE_UPLOADS", "0") == "1"
 
 
 def _has_cuda_device() -> bool:
@@ -317,7 +318,6 @@ class FFmpegFileCapture:
             "ffmpeg",
             "-nostdin",
             "-loglevel", "error",
-            "-re",
             "-hwaccel", "cuda",
             "-hwaccel_output_format", "cuda",
         ]

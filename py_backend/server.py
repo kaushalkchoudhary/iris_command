@@ -32,7 +32,7 @@ from sam import (
 )
 from log_utils import env_log_path, new_log_path
 from report import generate_report, REPORTS_DIR
-from helpers import get_video_duration
+from helpers import get_video_duration, JPEG_QUALITY
 
 IRIS_LOCAL = os.environ.get("IRIS_LOCAL", "0") == "1"
 DEFAULT_MEDIAMTX_HOST = "127.0.0.1" if IRIS_LOCAL else "mediamtx1.stagingbot.xyz"
@@ -133,6 +133,7 @@ frame_sequences: Dict[str, int] = {}
 raw_frame_lock = threading.Condition()
 raw_frame_buffer: Dict[str, bytes] = {}
 raw_frame_sequences: Dict[str, int] = {}
+raw_frame_bgr_buffer: Dict[str, np.ndarray] = {}
 
 jobs_lock = threading.Lock()
 jobs: Dict[str, dict] = {}
@@ -147,6 +148,10 @@ ffmpeg_writer_threads: Dict[str, threading.Thread] = {}
 ffmpeg_stop_events: Dict[str, threading.Event] = {}
 ffmpeg_next_start: Dict[str, float] = {}
 ffmpeg_frame_sequences: Dict[str, int] = {}
+raw_ffmpeg_publishers: Dict[str, subprocess.Popen] = {}
+raw_ffmpeg_log_files: Dict[str, object] = {}
+raw_ffmpeg_writer_threads: Dict[str, threading.Thread] = {}
+raw_ffmpeg_stop_events: Dict[str, threading.Event] = {}
 MEDIAMTX_RTSP_PORT = int(os.environ.get("IRIS_MEDIAMTX_RTSP_PORT", "8554"))
 # Always publish to the local MediaMTX instance (same machine).
 # The remote hostname is only for frontend WebRTC consumption via Cloudflare.
@@ -155,17 +160,26 @@ MEDIAMTX_PUBLISH_BASE = os.environ.get(
     f"rtsp://127.0.0.1:{MEDIAMTX_RTSP_PORT}",
 )
 PROCESSED_FPS = int(os.environ.get("IRIS_PROCESSED_FPS", "30"))
+PROCESSED_BITRATE = os.environ.get("IRIS_PROCESSED_BITRATE", "12M")
+PROCESSED_MAXRATE = os.environ.get("IRIS_PROCESSED_MAXRATE", "16M")
+PROCESSED_BUFSIZE = os.environ.get("IRIS_PROCESSED_BUFSIZE", "10M")
+PROCESSED_NVENC_PRESET = os.environ.get("IRIS_PROCESSED_NVENC_PRESET", "p5")
+RAW_BITRATE = os.environ.get("IRIS_RAW_BITRATE", "3M")
+RAW_MAXRATE = os.environ.get("IRIS_RAW_MAXRATE", "4M")
+RAW_BUFSIZE = os.environ.get("IRIS_RAW_BUFSIZE", "2M")
 PERSIST_ACTIVE_SOURCES = os.environ.get("IRIS_PERSIST_ACTIVE_SOURCES", "0") == "1"
 MAX_RTSP_STREAMS = int(os.environ.get("IRIS_MAX_RTSP_STREAMS", "4"))
 MAX_UPLOAD_STREAMS = int(os.environ.get("IRIS_MAX_UPLOAD_STREAMS", "2"))
 USE_NVENC = os.environ.get("IRIS_USE_NVENC", "1") == "1"
+RAW_USE_NVENC = os.environ.get("IRIS_RAW_USE_NVENC", "0") == "1"
+RAW_JPEG_ENCODE_PARAMS = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
 
 # Active mode tracking
 active_mode: Optional[str] = None
 
 # Fixed overlay config per mode
 MODE_OVERLAYS = {
-    "congestion": {"heatmap": True, "heatmap_full": True, "heatmap_trails": True, "trails": False, "bboxes": False},
+    "congestion": {"heatmap": True, "heatmap_full": True, "heatmap_trails": False, "trails": False, "bboxes": False},
     "vehicle":    {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": True, "bbox_label": "class"},
     "flow":       {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": True,  "bboxes": True, "bbox_label": "speed"},
     "forensics":  {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": False, "bbox_label": "class"},
@@ -278,6 +292,19 @@ def _wait_for_frame(name: str, timeout: float = 5.0):
             frame_lock.wait(timeout=0.3)
     return None
 
+def _wait_for_raw_bgr_frame(name: str, timeout: float = 5.0):
+    deadline = time.time() + timeout
+    with raw_frame_lock:
+        last_seq = raw_frame_sequences.get(name, 0)
+    while time.time() < deadline:
+        with raw_frame_lock:
+            if raw_frame_sequences.get(name, 0) > last_seq:
+                frame = raw_frame_bgr_buffer.get(name)
+                if frame is not None:
+                    return frame
+            raw_frame_lock.wait(timeout=0.3)
+    return None
+
 
 def _ffmpeg_writer_worker(name: str, proc: subprocess.Popen, stop_event: threading.Event, width: int, height: int):
     last_seq = -1
@@ -327,6 +354,41 @@ def _ffmpeg_writer_worker(name: str, proc: subprocess.Popen, stop_event: threadi
     except Exception:
         pass
 
+def _raw_ffmpeg_writer_worker(name: str, proc: subprocess.Popen, stop_event: threading.Event, width: int, height: int):
+    last_seq = -1
+    while not stop_event.is_set():
+        with raw_frame_lock:
+            while raw_frame_sequences.get(name, 0) <= last_seq and not stop_event.is_set():
+                raw_frame_lock.wait(timeout=0.3)
+            seq = raw_frame_sequences.get(name, 0)
+            frame = raw_frame_bgr_buffer.get(name)
+
+        if stop_event.is_set():
+            break
+        if frame is None or seq <= last_seq:
+            time.sleep(0.01)
+            continue
+
+        last_seq = seq
+        if frame.shape[1] != width or frame.shape[0] != height:
+            print(f"[FFMPEG RAW] Frame size changed for {name} ({width}x{height} -> {frame.shape[1]}x{frame.shape[0]}), restarting.")
+            break
+
+        try:
+            proc.stdin.write(frame.tobytes())
+            proc.stdin.flush()
+        except BrokenPipeError:
+            break
+        except Exception as e:
+            print(f"[FFMPEG RAW] Writer error for {name}: {e}")
+            break
+
+    try:
+        if proc.stdin:
+            proc.stdin.close()
+    except Exception:
+        pass
+
 
 def _start_ffmpeg_publisher(name: str, wait_timeout: float = 8.0) -> bool:
     _stop_ffmpeg_publisher(name)
@@ -346,18 +408,23 @@ def _start_ffmpeg_publisher(name: str, wait_timeout: float = 8.0) -> bool:
     if USE_NVENC:
         encoder_args = [
             "-c:v", "h264_nvenc",
-            "-preset", "p1",
+            "-preset", PROCESSED_NVENC_PRESET,
             "-tune", "ll",
             "-rc", "cbr",
-            "-b:v", "2M",
-            "-maxrate", "2M",
-            "-bufsize", "1M",
+            "-b:v", PROCESSED_BITRATE,
+            "-maxrate", PROCESSED_MAXRATE,
+            "-bufsize", PROCESSED_BUFSIZE,
+            "-spatial-aq", "1",
+            "-aq-strength", "8",
         ]
     else:
         encoder_args = [
             "-c:v", "libx264",
             "-preset", "ultrafast",
             "-tune", "zerolatency",
+            "-b:v", PROCESSED_BITRATE,
+            "-maxrate", PROCESSED_MAXRATE,
+            "-bufsize", PROCESSED_BUFSIZE,
         ]
 
     cmd = [
@@ -409,6 +476,101 @@ def _start_ffmpeg_publisher(name: str, wait_timeout: float = 8.0) -> bool:
         print(f"[FFMPEG] Failed to start publisher for {name}: {e}")
         return False
 
+def _start_raw_ffmpeg_publisher(name: str, wait_timeout: float = 10.0) -> bool:
+    _stop_raw_ffmpeg_publisher(name)
+    rtsp_url = f"{MEDIAMTX_PUBLISH_BASE}/{name}"
+
+    frame = _wait_for_raw_bgr_frame(name, timeout=wait_timeout)
+    if frame is None:
+        print(f"[FFMPEG RAW] No frames available for {name}, skipping raw publisher start.")
+        return False
+
+    height, width = frame.shape[:2]
+    if RAW_USE_NVENC:
+        encoder_args = [
+            "-c:v", "h264_nvenc",
+            "-preset", "p1",
+            "-tune", "ll",
+            "-rc", "cbr",
+            "-b:v", RAW_BITRATE,
+            "-maxrate", RAW_MAXRATE,
+            "-bufsize", RAW_BUFSIZE,
+        ]
+    else:
+        encoder_args = [
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-tune", "zerolatency",
+            "-b:v", RAW_BITRATE,
+            "-maxrate", RAW_MAXRATE,
+            "-bufsize", RAW_BUFSIZE,
+        ]
+
+    cmd = [
+        "ffmpeg",
+        "-nostdin",
+        "-loglevel", "warning",
+        "-fflags", "nobuffer",
+        "-flags", "low_delay",
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "-s", f"{width}x{height}",
+        "-r", str(PROCESSED_FPS),
+        "-i", "pipe:0",
+        "-vf", "format=yuv420p",
+        *encoder_args,
+        "-g", str(PROCESSED_FPS * 2),
+        "-bf", "0",
+        "-threads", "1",
+        "-f", "rtsp",
+        "-rtsp_transport", "tcp",
+        rtsp_url,
+    ]
+
+    try:
+        ffmpeg_log_path = env_log_path("ffmpeg") or (new_log_path("ffmpeg").parent / "ffmpeg.log")
+        ffmpeg_log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file = open(ffmpeg_log_path, "a", buffering=1)
+        raw_ffmpeg_log_files[name] = log_file
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=log_file,
+            stderr=log_file,
+            start_new_session=True,
+        )
+        raw_ffmpeg_publishers[name] = proc
+        stop_event = threading.Event()
+        raw_ffmpeg_stop_events[name] = stop_event
+        thread = threading.Thread(
+            target=_raw_ffmpeg_writer_worker,
+            args=(name, proc, stop_event, width, height),
+            daemon=True,
+        )
+        raw_ffmpeg_writer_threads[name] = thread
+        thread.start()
+        print(f"[FFMPEG RAW] Started publisher for {name} -> {name} (pid={proc.pid})")
+        return True
+    except Exception as e:
+        print(f"[FFMPEG RAW] Failed to start publisher for {name}: {e}")
+        return False
+
+def _start_raw_ffmpeg_publisher_async(name: str):
+    def _run():
+        for _ in range(3):
+            if _start_raw_ffmpeg_publisher(name):
+                return
+            time.sleep(1.5)
+    threading.Thread(target=_run, daemon=True).start()
+
+def _start_ffmpeg_publisher_async(name: str):
+    def _run():
+        for _ in range(5):
+            if _start_ffmpeg_publisher(name):
+                return
+            time.sleep(1.0)
+    threading.Thread(target=_run, daemon=True).start()
+
 def _stop_ffmpeg_publisher(name: str):
     ffmpeg_next_start.pop(name, None)
     ffmpeg_frame_sequences.pop(name, None)
@@ -441,6 +603,37 @@ def _stop_ffmpeg_publisher(name: str):
         except Exception:
             pass
         print(f"[FFMPEG] Stopped publisher for {name}")
+
+def _stop_raw_ffmpeg_publisher(name: str):
+    stop_event = raw_ffmpeg_stop_events.pop(name, None)
+    if stop_event:
+        stop_event.set()
+
+    proc = raw_ffmpeg_publishers.pop(name, None)
+    if proc:
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    thread = raw_ffmpeg_writer_threads.pop(name, None)
+    if thread:
+        try:
+            thread.join(timeout=1)
+        except Exception:
+            pass
+
+    log_file = raw_ffmpeg_log_files.pop(name, None)
+    if log_file:
+        try:
+            log_file.close()
+        except Exception:
+            pass
+        print(f"[FFMPEG RAW] Stopped publisher for {name}")
 
 _ffmpeg_monitor_sources: set = set()
 _ffmpeg_monitor_thread: threading.Thread = None
@@ -498,6 +691,8 @@ def _ensure_ffmpeg_monitor():
 def _stop_all_ffmpeg_publishers():
     for name in list(ffmpeg_publishers.keys()):
         _stop_ffmpeg_publisher(name)
+    for name in list(raw_ffmpeg_publishers.keys()):
+        _stop_raw_ffmpeg_publisher(name)
 
 
 # ── Overlay / metrics / frame management ──
@@ -591,9 +786,33 @@ def update_frame(stream: str, jpeg_data: bytes):
         frame_sequences[stream] = frame_sequences.get(stream, 0) + 1
         frame_lock.notify_all()
 
-def update_raw_frame(stream: str, jpeg_data: bytes):
+def update_raw_frame(stream: str, frame: np.ndarray):
+    if frame is None or not isinstance(frame, np.ndarray):
+        return
+
+    try:
+        ret_enc, buffer = cv2.imencode(".jpg", frame, RAW_JPEG_ENCODE_PARAMS)
+        if not ret_enc:
+            return
+        jpeg_data = buffer.tobytes()
+    except Exception:
+        return
+
+    # Mark source/upload active on first raw frame for snappier UI state.
+    with source_lock:
+        for info in running_sources.values():
+            if info.get("name") == stream:
+                info["started_processing"] = True
+    with upload_sources_lock:
+        info = upload_sources.get(stream)
+        if info:
+            info["started_processing"] = True
+            if not info.get("started_at"):
+                info["started_at"] = time.time()
+
     with raw_frame_lock:
         raw_frame_buffer[stream] = jpeg_data
+        raw_frame_bgr_buffer[stream] = frame
         raw_frame_sequences[stream] = raw_frame_sequences.get(stream, 0) + 1
         raw_frame_lock.notify_all()
 
@@ -797,6 +1016,7 @@ def _stop_all_sources():
         frame_sequences.clear()
     with raw_frame_lock:
         raw_frame_buffer.clear()
+        raw_frame_bgr_buffer.clear()
         raw_frame_sequences.clear()
 
     # 6. Force Resource Reclamation
@@ -958,6 +1178,11 @@ def set_overlay(name: str, update: OverlayUpdate):
             new_state["active_mode"] = cur.get("active_mode")
         if "bbox_label" in cur:
             new_state["bbox_label"] = cur.get("bbox_label")
+        if cur.get("active_mode") == "congestion":
+            # Congestion mode is heatmap-only.
+            new_state["heatmap_trails"] = False
+            new_state["trails"] = False
+            new_state["bboxes"] = False
         overlays[name] = dict(new_state)
         print(
             f"[OVERLAY] {name} updated: heatmap={new_state['heatmap']}, "
@@ -1045,20 +1270,21 @@ def start_source(req: SourceStartRequest):
     if req.index < 1 or req.index > len(cfg["rtsp_links"]):
         raise HTTPException(400)
 
-    if req.mode and req.mode != active_mode:
-        print(f"[MODE] Switching from {active_mode} -> {req.mode}, stopping all sources")
-        _stop_all_sources()
+    source_mode = req.mode or active_mode
+    if req.mode and active_mode and req.mode != active_mode:
+        print(f"[MODE] Running mixed modes in parallel: global={active_mode}, source={req.mode}")
+    if req.mode and not active_mode:
         active_mode = req.mode
 
     url = cfg["rtsp_links"][req.index - 1]
     name = source_display_name(url)
 
     base_overlay = MODE_OVERLAYS.get(
-        active_mode,
+        source_mode,
         {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": False},
     )
-    mode_confidence = MODE_CONFIDENCE.get(active_mode, 0.15)
-    overlay_config = {**base_overlay, "confidence": mode_confidence, "active_mode": active_mode}
+    mode_confidence = MODE_CONFIDENCE.get(source_mode, 0.15)
+    overlay_config = {**base_overlay, "confidence": mode_confidence, "active_mode": source_mode}
 
     with source_lock:
         if req.index in running_sources:
@@ -1075,7 +1301,7 @@ def start_source(req: SourceStartRequest):
                 cfg["active_sources"] = active
                 save_rtsp_config(cfg)
                 
-            return {"status": "started", "index": req.index, "mode": active_mode, "info": "already_running"}
+            return {"status": "started", "index": req.index, "mode": source_mode, "info": "already_running"}
 
         # Calculate total active streams (including this new one) for dynamic GPU allocation
         with upload_sources_lock:
@@ -1095,7 +1321,8 @@ def start_source(req: SourceStartRequest):
     print(f"[OVERLAY] {name} set from mode config: {overlay_config}")
 
     _ffmpeg_monitor_sources.add(name)
-    ffmpeg_next_start[name] = time.time() + 3.0
+    ffmpeg_next_start[name] = time.time() + 1.0
+    _start_ffmpeg_publisher_async(name)
     _ensure_ffmpeg_monitor()
 
     if PERSIST_ACTIVE_SOURCES:
@@ -1104,7 +1331,7 @@ def start_source(req: SourceStartRequest):
             active.append(req.index)
         cfg["active_sources"] = active
         save_rtsp_config(cfg)
-    return {"status": "started", "index": req.index, "mode": active_mode}
+    return {"status": "started", "index": req.index, "mode": source_mode}
 
 @app.post("/api/sources/stop")
 def stop_source(req: SourceIndexRequest):
@@ -1143,6 +1370,10 @@ def stop_source(req: SourceIndexRequest):
         with frame_lock:
             frame_buffer.pop(name, None)
             frame_sequences.pop(name, 0)
+        with raw_frame_lock:
+            raw_frame_buffer.pop(name, None)
+            raw_frame_bgr_buffer.pop(name, None)
+            raw_frame_sequences.pop(name, None)
 
     if PERSIST_ACTIVE_SOURCES:
         cfg["active_sources"] = [i for i in cfg.get("active_sources", []) if i != req.index]
@@ -1330,24 +1561,30 @@ def api_generate_report(name: str):
 @app.get("/api/stream/{name}")
 def stream_video(name: str):
     def generate():
-        last_seq = -1
+        last_processed_seq = -1
+        last_raw_seq = -1
         while True:
+            frame = None
+
             with frame_lock:
-                while frame_sequences.get(name, 0) <= last_seq:
-                    # Zerolatency: Wait for any frame (raw or processed)
-                    if not frame_lock.wait(timeout=0.2):
-                        break
+                processed_seq = frame_sequences.get(name, 0)
+                if processed_seq > last_processed_seq:
+                    frame = frame_buffer.get(name)
+                    last_processed_seq = processed_seq
 
-                frame = frame_buffer.get(name)
-                # Ensure we skip old frames if many accumulated
-                last_seq = frame_sequences.get(name, 0)
+            if frame is None:
+                with raw_frame_lock:
+                    raw_seq = raw_frame_sequences.get(name, 0)
+                    if raw_seq > last_raw_seq:
+                        frame = raw_frame_buffer.get(name)
+                        last_raw_seq = raw_seq
 
-            if frame:
+            if frame is not None:
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-            
-            # Very tight loop for zerolatency
-            time.sleep(0.001)
+            else:
+                # No fresh frame on either path yet.
+                time.sleep(0.01)
 
     return StreamingResponse(
         generate(),
@@ -1425,6 +1662,7 @@ def _stop_all_uploads(delete_files: bool = False):
     for name in names:
         _ffmpeg_monitor_sources.discard(name)
         _stop_ffmpeg_publisher(name)
+        _stop_raw_ffmpeg_publisher(name)
 
     with upload_sources_lock:
         for name, info in list(upload_sources.items()):
@@ -1459,11 +1697,13 @@ def _stop_all_uploads(delete_files: bool = False):
     with raw_frame_lock:
         for name in names:
             raw_frame_buffer.pop(name, None)
+            raw_frame_bgr_buffer.pop(name, None)
             raw_frame_sequences.pop(name, None)
 
 def _stop_upload_by_name(name: str, delete_file: bool = False):
     _ffmpeg_monitor_sources.discard(name)
     _stop_ffmpeg_publisher(name)
+    _stop_raw_ffmpeg_publisher(name)
     with upload_sources_lock:
         info = upload_sources.get(name)
         if not info:
@@ -1492,6 +1732,7 @@ def _stop_upload_by_name(name: str, delete_file: bool = False):
         frame_sequences.pop(name, 0)
     with raw_frame_lock:
         raw_frame_buffer.pop(name, None)
+        raw_frame_bgr_buffer.pop(name, None)
         raw_frame_sequences.pop(name, None)
 
 @app.post("/api/upload")
@@ -1505,12 +1746,10 @@ async def upload_video(file: UploadFile = File(...), mode: Optional[str] = Form(
             raise HTTPException(400, "Unsupported file format. Use MP4, MKV, AVI, or MOV.")
 
     global active_mode
+    upload_mode = mode or active_mode
     if mode and active_mode and mode != active_mode:
-        print(f"[MODE] Switching from {active_mode} -> {mode} (upload)")
-        _stop_all_sources()
-        active_mode = mode
+        print(f"[MODE] Running mixed modes in parallel: global={active_mode}, upload={mode}")
     elif mode and not active_mode:
-        # Initialize active_mode without stopping existing streams
         active_mode = mode
 
     original_name = Path(file.filename).stem
@@ -1535,17 +1774,17 @@ async def upload_video(file: UploadFile = File(...), mode: Optional[str] = Form(
     duration = get_video_duration(str(target))
 
     base_overlay = MODE_OVERLAYS.get(
-        active_mode,
+        upload_mode,
         {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": False},
     )
-    mode_confidence = MODE_CONFIDENCE.get(active_mode, 0.15)
-    overlay_config = {**base_overlay, "confidence": mode_confidence, "active_mode": active_mode}
+    mode_confidence = MODE_CONFIDENCE.get(upload_mode, 0.15)
+    overlay_config = {**base_overlay, "confidence": mode_confidence, "active_mode": upload_mode}
 
     with overlay_lock:
         overlays[name] = dict(overlay_config)
 
-    is_crowd_mode = active_mode == "crowd"
-    print(f"[UPLOAD] {name} overlays from active_mode={active_mode}, is_crowd={is_crowd_mode}: {overlay_config}")
+    is_crowd_mode = upload_mode == "crowd"
+    print(f"[UPLOAD] {name} overlays from mode={upload_mode}, is_crowd={is_crowd_mode}: {overlay_config}")
 
     # Calculate total active streams for dynamic GPU allocation
     with upload_sources_lock:
@@ -1559,6 +1798,7 @@ async def upload_video(file: UploadFile = File(...), mode: Optional[str] = Form(
     process, stop = start_upload_callback(str(target), name, overlay_config, is_crowd_mode, active_streams, realtime=True)
     if process is None:
         raise HTTPException(500, "Failed to start upload inference")
+    _start_raw_ffmpeg_publisher_async(name)
 
     with upload_sources_lock:
         upload_sources[name] = {
@@ -1570,14 +1810,15 @@ async def upload_video(file: UploadFile = File(...), mode: Optional[str] = Form(
             "duration": duration,
             "started_processing": False,
             "started_at": None,
-            "mode": active_mode,
+            "mode": upload_mode,
         }
 
     with jobs_lock:
         jobs[job_id] = {"id": job_id, "name": name, "status": "processing"}
 
     _ffmpeg_monitor_sources.add(name)
-    ffmpeg_next_start[name] = time.time() + 3.0
+    ffmpeg_next_start[name] = time.time() + 1.0
+    _start_ffmpeg_publisher_async(name)
     _ensure_ffmpeg_monitor()
 
     return {
@@ -1640,11 +1881,13 @@ def restart_upload(name: str):
     # Cleanup old process info in ffmpeg monitor just in case
     _ffmpeg_monitor_sources.discard(name)
     _stop_ffmpeg_publisher(name)
+    _stop_raw_ffmpeg_publisher(name)
 
     # Start new process
     process, stop = start_upload_callback(file_path, name, overlay_config, is_crowd_mode, active_streams, realtime=True)
     if process is None:
         raise HTTPException(500, "Failed to restart upload inference")
+    _start_raw_ffmpeg_publisher_async(name)
 
     with upload_sources_lock:
         upload_sources[name] = {
@@ -1664,7 +1907,8 @@ def restart_upload(name: str):
 
     # Restart monitor
     _ffmpeg_monitor_sources.add(name)
-    ffmpeg_next_start[name] = time.time() + 3.0
+    ffmpeg_next_start[name] = time.time() + 1.0
+    _start_ffmpeg_publisher_async(name)
     _ensure_ffmpeg_monitor()
 
     return {"status": "restarted", "name": name}
@@ -1689,6 +1933,7 @@ def list_uploads():
 def stop_upload(name: str):
     _ffmpeg_monitor_sources.discard(name)
     _stop_ffmpeg_publisher(name)
+    _stop_raw_ffmpeg_publisher(name)
     with upload_sources_lock:
         info = upload_sources.get(name)
         if info:
@@ -1709,6 +1954,7 @@ def stop_upload(name: str):
 def delete_upload(name: str):
     _ffmpeg_monitor_sources.discard(name)
     _stop_ffmpeg_publisher(name)
+    _stop_raw_ffmpeg_publisher(name)
     with upload_sources_lock:
         info = upload_sources.pop(name, None)
         if info:
