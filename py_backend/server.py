@@ -539,6 +539,22 @@ def get_overlay_state(stream: str) -> Dict[str, bool]:
             "bboxes": True
         }))
 
+def _resolve_source_mode(name: str, source_metrics: Optional[dict] = None) -> Optional[str]:
+    """Resolve mode with per-source precedence before falling back to global mode."""
+    with upload_sources_lock:
+        upload_info = upload_sources.get(name)
+        if upload_info and upload_info.get("mode"):
+            return upload_info.get("mode")
+    with overlay_lock:
+        overlay_mode = (overlays.get(name) or {}).get("active_mode")
+        if overlay_mode:
+            return overlay_mode
+    if isinstance(source_metrics, dict):
+        metric_mode = source_metrics.get("mode")
+        if metric_mode:
+            return metric_mode
+    return active_mode
+
 def update_metrics(stream: str, data: dict):
     # Handle critical workflow signals first
     if data.get("__started__"):
@@ -558,7 +574,8 @@ def update_metrics(stream: str, data: dict):
         # Reports are triggered manually by the user.
         return
 
-    if active_mode == "forensics":
+    stream_mode = _resolve_source_mode(stream, data)
+    if stream_mode == "forensics":
         # Suppress standard metrics data store in Forensics mode
         return
 
@@ -936,6 +953,11 @@ def set_overlay(name: str, update: OverlayUpdate):
             "bboxes": update.bboxes if update.bboxes is not None else cur.get("bboxes", True),
             "confidence": new_confidence,
         }
+        # Preserve mode context and label behavior set by mode configs.
+        if "active_mode" in cur:
+            new_state["active_mode"] = cur.get("active_mode")
+        if "bbox_label" in cur:
+            new_state["bbox_label"] = cur.get("bbox_label")
         overlays[name] = dict(new_state)
         print(
             f"[OVERLAY] {name} updated: heatmap={new_state['heatmap']}, "
@@ -1230,18 +1252,7 @@ def api_generate_report(name: str):
             print(f"[REPORT] WARNING: No metrics found for {name}")
 
     # Resolve per-source mode (overrides global active_mode)
-    report_mode = None
-    with upload_sources_lock:
-        upload_info = upload_sources.get(name)
-        if upload_info and upload_info.get("mode"):
-            report_mode = upload_info.get("mode")
-    with overlay_lock:
-        if not report_mode:
-            report_mode = (overlays.get(name) or {}).get("active_mode")
-    if not report_mode:
-        report_mode = source_metrics.get("mode") if isinstance(source_metrics, dict) else None
-    if not report_mode:
-        report_mode = active_mode
+    report_mode = _resolve_source_mode(name, source_metrics)
 
     # Forensics special: Inject data from sam_results
     if report_mode == "forensics":

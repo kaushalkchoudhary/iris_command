@@ -33,7 +33,7 @@ from helpers import (
 from overlays import TrailRenderer, HeatmapRenderer, CrowdHeatmapRenderer, FullHeatmapRenderer
 from crowd import CrowdAnalyticsState, CrowdCounter
 from yolobyte import AnalyticsState, classify_speed
-from sam import sam_results, sam_results_lock
+from sam import sam_results, sam_results_lock, sam_threads
 
 
 MODEL_PATH_VEHICLE = "models/yolov11n-visdrone.pt"
@@ -344,10 +344,16 @@ class SharedInferenceManager:
             if state.mode == "forensics":
                 try:
                     annotated = None
-                    with sam_results_lock:
-                        info = sam_results.get(state.name)
-                        if info and info.get("annotated_frame"):
-                            annotated = base64.b64decode(info["annotated_frame"])
+                    active_sam = False
+                    sam_info = sam_threads.get(state.name)
+                    if sam_info:
+                        stop_evt = sam_info.get("stop_event")
+                        active_sam = bool(stop_evt is not None and not stop_evt.is_set())
+                    if active_sam:
+                        with sam_results_lock:
+                            info = sam_results.get(state.name)
+                            if info and info.get("annotated_frame"):
+                                annotated = base64.b64decode(info["annotated_frame"])
                     if annotated:
                         if self.frame_queue.full():
                             try:
