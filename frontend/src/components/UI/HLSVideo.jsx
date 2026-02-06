@@ -73,12 +73,13 @@ const HLSVideo = ({ src, fallbackSrc, className = '', ...props }) => {
         enableWorker: true,
         lowLatencyMode: true,
 
-        backBufferLength: 12,
-        maxBufferLength: 6,
-        maxMaxBufferLength: 10,
+        backBufferLength: 20,
+        maxBufferLength: 10,
+        maxMaxBufferLength: 20,
 
-        liveSyncDurationCount: 1,
-        liveMaxLatencyDurationCount: 3,
+        // Slightly relaxed LL-HLS edge to avoid micro-stalls/rebuffers.
+        liveSyncDurationCount: 2,
+        liveMaxLatencyDurationCount: 5,
 
         abrEwmaFastLive: 2,
         abrEwmaSlowLive: 6,

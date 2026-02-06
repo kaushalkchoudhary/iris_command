@@ -20,7 +20,7 @@ from overlays import TrailRenderer, HeatmapRenderer, CrowdHeatmapRenderer, FullH
 from crowd import CrowdAnalyticsState, CrowdCounter
 
 # Model paths
-MODEL_PATH_VEHICLE = "models/yolov11n-visdrone.pt"
+MODEL_PATH_VEHICLE = os.environ.get("IRIS_VEHICLE_MODEL_PATH", "models/yolov11n-visdrone.pt")
 MODEL_PATH_CROWD_YOLO = "models/best_head.pt"
 MODEL_PATH_CROWD_CCN = "models/crowd-model.pth"
 USE_CCN_FOR_CROWD = True
@@ -37,6 +37,21 @@ THRESH_SLOW = 50.0
 THRESH_MEDIUM = 160.0
 
 EMA_ALPHA = 0.2
+
+# Ego-motion compensation tuning (env-overridable).
+THRESH_STALLED = float(os.environ.get("IRIS_THRESH_STALLED", str(THRESH_STALLED)))
+THRESH_SLOW = float(os.environ.get("IRIS_THRESH_SLOW", str(THRESH_SLOW)))
+THRESH_MEDIUM = float(os.environ.get("IRIS_THRESH_MEDIUM", str(THRESH_MEDIUM)))
+EGO_BLEND = float(os.environ.get("IRIS_EGO_BLEND", "0.25"))
+EGO_DECAY = float(os.environ.get("IRIS_EGO_DECAY", "0.92"))
+EGO_MAX_PX_S = float(os.environ.get("IRIS_EGO_MAX_PX_S", "6.0"))
+EGO_DEADZONE = float(os.environ.get("IRIS_EGO_DEADZONE", "1.0"))
+EGO_MIN_FLOOR_RATIO = float(os.environ.get("IRIS_EGO_MIN_FLOOR_RATIO", "0.35"))
+SPEED_WARMUP_SAMPLES = int(os.environ.get("IRIS_SPEED_WARMUP_SAMPLES", "2"))
+USE_NORMALIZED_SPEED = os.environ.get("IRIS_USE_NORMALIZED_SPEED", "1") == "1"
+SPEED_NORM_MIN_BBOX_H = float(os.environ.get("IRIS_SPEED_NORM_MIN_BBOX_H", "18.0"))
+ABNORMAL_STD_THRESH = float(os.environ.get("IRIS_ABNORMAL_STD_THRESH", "0.20"))
+ABNORMAL_MEAN_THRESH = float(os.environ.get("IRIS_ABNORMAL_MEAN_THRESH", "0.18"))
 
 # Hot region grid settings
 HOT_GRID_COLS = 6
@@ -66,6 +81,7 @@ class AnalyticsState:
         "class_names",
         "track_first_seen", "track_last_seen", "track_class", "track_bbox_dims",
         "track_speed_history", "track_position_history",
+        "track_velocity_samples",
         "track_state", "track_behavior", "track_impact_score",
         "grid_congestion_ema", "grid_first_hot", "grid_hot_history",
         "prev_region_cell_count", "hot_regions_cache",
@@ -91,6 +107,7 @@ class AnalyticsState:
         self.track_bbox_dims = {}
         self.track_speed_history = {}
         self.track_position_history = {}
+        self.track_velocity_samples = {}
         self.track_state = {}
         self.track_behavior = {}
         self.track_impact_score = {}
@@ -122,6 +139,7 @@ class AnalyticsState:
         speed_counts = [0, 0, 0, 0]
         total_area = 0.0
         new_positions = {}
+        new_velocity_samples = {}
         class_counts = {}
         displacements = []  # For ego-motion estimation
 
@@ -142,7 +160,7 @@ class AnalyticsState:
                 displacements.append((dx / dt, dy / dt))
 
         # Estimate ego-motion as median displacement (drone/camera movement)
-        if len(displacements) >= 3:
+        if len(displacements) >= 4:
             # Use lowest-motion percentile to estimate camera motion robustly
             mags = [np.hypot(d[0], d[1]) for d in displacements]
             order = np.argsort(mags)
@@ -152,13 +170,21 @@ class AnalyticsState:
             dy_list = [displacements[i][1] for i in sel]
             ego_dx = float(np.median(dx_list))
             ego_dy = float(np.median(dy_list))
+            # Be conservative to avoid turning moving vehicles into "stalled".
+            ego_mag = float(np.hypot(ego_dx, ego_dy))
+            if ego_mag < EGO_DEADZONE:
+                ego_dx, ego_dy = 0.0, 0.0
+            elif ego_mag > EGO_MAX_PX_S:
+                scale = EGO_MAX_PX_S / max(ego_mag, 1e-6)
+                ego_dx *= scale
+                ego_dy *= scale
             # Smooth ego-motion estimate
-            self.ego_motion_x = self.ego_motion_x * 0.3 + ego_dx * 0.7
-            self.ego_motion_y = self.ego_motion_y * 0.3 + ego_dy * 0.7
+            self.ego_motion_x = self.ego_motion_x * (1.0 - EGO_BLEND) + ego_dx * EGO_BLEND
+            self.ego_motion_y = self.ego_motion_y * (1.0 - EGO_BLEND) + ego_dy * EGO_BLEND
         else:
             # Not enough tracks, decay ego-motion estimate
-            self.ego_motion_x *= 0.9
-            self.ego_motion_y *= 0.9
+            self.ego_motion_x *= EGO_DECAY
+            self.ego_motion_y *= EGO_DECAY
 
         # Second pass: calculate compensated speeds
         for i in range(len(tids)):
@@ -175,21 +201,40 @@ class AnalyticsState:
                 self.track_bbox_dims[tid] = (float(x2 - x1), float(y2 - y1))
 
             speed_px_s = 0.0
+            vel_samples = 0
             if tid in self.track_positions:
                 old_cx, old_cy, old_speed, old_ts = self.track_positions[tid]
                 dt = max(1e-3, min(0.5, now - old_ts))
+                ux = (cx - old_cx) / dt
+                uy = (cy - old_cy) / dt
+                uncomp_speed = np.sqrt(ux * ux + uy * uy)
                 # Compensate for ego-motion (subtract drone movement)
-                vx = (cx - old_cx) / dt - self.ego_motion_x
-                vy = (cy - old_cy) / dt - self.ego_motion_y
-                raw_speed = np.sqrt(vx * vx + vy * vy)
+                vx = ux - self.ego_motion_x
+                vy = uy - self.ego_motion_y
+                comp_speed = np.sqrt(vx * vx + vy * vy)
+                if USE_NORMALIZED_SPEED:
+                    bbox_h = max(1.0, float(y2 - y1))
+                    norm_div = max(SPEED_NORM_MIN_BBOX_H, bbox_h)
+                else:
+                    norm_div = 1.0
+                comp_metric = comp_speed / norm_div
+                uncomp_metric = uncomp_speed / norm_div
+                raw_speed = max(comp_metric, uncomp_metric * EGO_MIN_FLOOR_RATIO)
                 speed_px_s = old_speed * 0.4 + raw_speed * 0.6 if old_speed > 0 else raw_speed
+                vel_samples = self.track_velocity_samples.get(tid, 0) + 1
 
             new_positions[tid] = (cx, cy, speed_px_s, now)
-            speed_cat = classify_speed(speed_px_s)
+            new_velocity_samples[tid] = vel_samples
+            # Prevent fresh/re-id tracks from being immediately counted as "stalled".
+            if vel_samples < SPEED_WARMUP_SAMPLES:
+                speed_cat = 2  # treat as medium/moving during warm-up
+            else:
+                speed_cat = classify_speed(speed_px_s)
             speed_counts[speed_cat] += 1
             self.speed_categories[tid] = speed_cat
 
         self.track_positions = new_positions
+        self.track_velocity_samples = new_velocity_samples
         self._update_vehicle_analytics()
         
         # Compute hot regions only every 1 second (expensive operation)
@@ -208,7 +253,7 @@ class AnalyticsState:
         for tid in expired:
             for d in (self.track_first_seen, self.track_last_seen, self.track_class,
                       self.track_bbox_dims, self.track_speed_history,
-                      self.track_position_history, self.track_state,
+                      self.track_position_history, self.track_velocity_samples, self.track_state,
                       self.track_behavior, self.track_impact_score):
                 d.pop(tid, None)
 
@@ -221,9 +266,10 @@ class AnalyticsState:
             if now - self.track_first_seen[tid] > 0.5 and len(self.track_position_history.get(tid, [])) >= 3:
                 self.total_unique_ids.add(tid)
 
-            if tid not in self.track_speed_history:
-                self.track_speed_history[tid] = deque(maxlen=12)
-            self.track_speed_history[tid].append(speed)
+            if self.track_velocity_samples.get(tid, 0) >= SPEED_WARMUP_SAMPLES:
+                if tid not in self.track_speed_history:
+                    self.track_speed_history[tid] = deque(maxlen=12)
+                self.track_speed_history[tid].append(speed)
 
             if tid not in self.track_position_history:
                 self.track_position_history[tid] = deque(maxlen=12)
@@ -241,8 +287,12 @@ class AnalyticsState:
         hist = self.track_speed_history.get(tid)
         if hist and len(hist) >= 4:
             arr = np.array(hist)
-            if arr.std() > 40.0 and arr.mean() > 15.0:
-                return "abnormal"
+            if USE_NORMALIZED_SPEED:
+                if arr.std() > ABNORMAL_STD_THRESH and arr.mean() > ABNORMAL_MEAN_THRESH:
+                    return "abnormal"
+            else:
+                if arr.std() > 40.0 and arr.mean() > 15.0:
+                    return "abnormal"
         return "moving"
 
     def _classify_behavior(self, tid):

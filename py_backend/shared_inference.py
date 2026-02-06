@@ -36,12 +36,23 @@ from yolobyte import AnalyticsState, classify_speed
 from sam import sam_results, sam_results_lock, sam_threads
 
 
-MODEL_PATH_VEHICLE = "models/yolov11n-visdrone.pt"
+MODEL_PATH_VEHICLE = os.environ.get("IRIS_VEHICLE_MODEL_PATH", "models/yolov11n-visdrone.pt")
 MODEL_PATH_CROWD_YOLO = "models/best_head.pt"
 MODEL_PATH_CROWD_CCN = "models/crowd-model.pth"
 USE_CCN_FOR_CROWD = True
 UPLOAD_INFERENCE_SIZE = int(os.environ.get("IRIS_UPLOAD_INFERENCE_SIZE", "640"))
 UPLOAD_MAX_DET = int(os.environ.get("IRIS_UPLOAD_MAX_DET", "35"))
+CONGESTION_INFERENCE_SIZE = int(os.environ.get("IRIS_CONGESTION_INFERENCE_SIZE", "640"))
+CONGESTION_MAX_DET = int(os.environ.get("IRIS_CONGESTION_MAX_DET", "30"))
+# Vehicle-route tracker profile (ported from yolo-bytetrack-vehicle-tracking reference).
+VEH_TRACK_ACTIVATION = float(os.environ.get("IRIS_VEH_TRACK_ACTIVATION", "0.25"))
+VEH_TRACK_BUFFER = int(os.environ.get("IRIS_VEH_TRACK_BUFFER", "30"))
+VEH_TRACK_MATCH = float(os.environ.get("IRIS_VEH_TRACK_MATCH", "0.8"))
+VEH_TRACK_MIN_CONSEC = int(os.environ.get("IRIS_VEH_TRACK_MIN_CONSEC", "1"))
+FLOW_TRACK_ACTIVATION = float(os.environ.get("IRIS_FLOW_TRACK_ACTIVATION", str(VEH_TRACK_ACTIVATION)))
+FLOW_TRACK_BUFFER = int(os.environ.get("IRIS_FLOW_TRACK_BUFFER", str(VEH_TRACK_BUFFER)))
+FLOW_TRACK_MATCH = float(os.environ.get("IRIS_FLOW_TRACK_MATCH", str(VEH_TRACK_MATCH)))
+FLOW_TRACK_MIN_CONSEC = int(os.environ.get("IRIS_FLOW_TRACK_MIN_CONSEC", str(VEH_TRACK_MIN_CONSEC)))
 
 
 class ThreadHandle:
@@ -266,14 +277,30 @@ class SharedInferenceManager:
                 state.ccn_counter = CrowdCounter(MODEL_PATH_CROWD_CCN, "cuda" if self.device == "cuda" else "cpu")
         else:
             state.cached_overlay["confidence"] = VEHICLE_CONF_THRESH
-            import supervision as sv
-            state.tracker = sv.ByteTrack(
-                frame_rate=int(src_fps),
-                track_activation_threshold=TRACK_ACTIVATION_THRESHOLD,
-                lost_track_buffer=TRACK_LOST_BUFFER,
-                minimum_matching_threshold=TRACK_MATCH_THRESHOLD,
-                minimum_consecutive_frames=TRACK_MIN_CONSEC,
-            )
+            if state.mode != "congestion":
+                if state.mode == "vehicle":
+                    track_activation = VEH_TRACK_ACTIVATION
+                    lost_buffer = VEH_TRACK_BUFFER
+                    match_threshold = VEH_TRACK_MATCH
+                    min_consec = VEH_TRACK_MIN_CONSEC
+                elif state.mode == "flow":
+                    track_activation = FLOW_TRACK_ACTIVATION
+                    lost_buffer = FLOW_TRACK_BUFFER
+                    match_threshold = FLOW_TRACK_MATCH
+                    min_consec = FLOW_TRACK_MIN_CONSEC
+                else:
+                    track_activation = TRACK_ACTIVATION_THRESHOLD
+                    lost_buffer = TRACK_LOST_BUFFER
+                    match_threshold = TRACK_MATCH_THRESHOLD
+                    min_consec = TRACK_MIN_CONSEC
+                import supervision as sv
+                state.tracker = sv.ByteTrack(
+                    frame_rate=int(src_fps),
+                    track_activation_threshold=track_activation,
+                    lost_track_buffer=lost_buffer,
+                    minimum_matching_threshold=match_threshold,
+                    minimum_consecutive_frames=min_consec,
+                )
             if state.mode != "congestion":
                 state.trail_renderer = TrailRenderer(max_len=15)
             state.heatmap_renderer = HeatmapRenderer(max_len=8)
@@ -449,8 +476,12 @@ class SharedInferenceManager:
                 by_conf = {}
                 for state, frame, seq in vehicle_batch:
                     conf = float(state.cached_overlay.get("confidence", VEHICLE_CONF_THRESH))
-                    imgsz = UPLOAD_INFERENCE_SIZE if state.is_upload else INFERENCE_SIZE
-                    max_det = UPLOAD_MAX_DET if state.is_upload else MAX_DET
+                    if state.mode == "congestion":
+                        imgsz = CONGESTION_INFERENCE_SIZE
+                        max_det = CONGESTION_MAX_DET
+                    else:
+                        imgsz = UPLOAD_INFERENCE_SIZE if state.is_upload else INFERENCE_SIZE
+                        max_det = UPLOAD_MAX_DET if state.is_upload else MAX_DET
                     key = (round(conf, 3), int(imgsz), int(max_det))
                     by_conf.setdefault(key, []).append((state, frame, seq, conf, imgsz, max_det))
 
@@ -507,12 +538,15 @@ class SharedInferenceManager:
         overlay = state.cached_overlay
         mode = state.mode or overlay.get("active_mode")
         is_congestion_mode = mode == "congestion"
+        heatmap_enabled = bool(overlay.get("heatmap", True))
+        full_heatmap_enabled = heatmap_enabled and bool(overlay.get("heatmap_full", False))
         trails_enabled = bool(overlay.get("trails", True)) and not is_congestion_mode
-        heatmap_trails_enabled = bool(overlay.get("heatmap_trails", overlay.get("heatmap", True))) and not is_congestion_mode
+        # In congestion mode we still want per-vehicle heatmap; only trails/boxes are disabled.
+        heatmap_trails_enabled = heatmap_enabled and bool(overlay.get("heatmap_trails", True))
         bboxes_enabled = bool(overlay.get("bboxes", True)) and not is_congestion_mode
 
         detections = sv.Detections.from_ultralytics(result)
-        tracked = state.tracker.update_with_detections(detections) if state.tracker else detections
+        tracked = detections if is_congestion_mode else (state.tracker.update_with_detections(detections) if state.tracker else detections)
         smoothed_xyxy = None
         if bboxes_enabled and tracked is not None and tracked.tracker_id is not None and state.bbox_smoother:
             smoothed_xyxy = state.bbox_smoother.smooth(tracked)
@@ -523,11 +557,11 @@ class SharedInferenceManager:
         current_ids = state.trail_renderer.update(tracked) if trails_enabled and state.trail_renderer else set()
 
         if heatmap_trails_enabled and state.heatmap_renderer:
-            state.heatmap_renderer.update(tracked)
-        if state.full_heatmap_renderer:
+            state.heatmap_renderer.update(tracked, frame.shape)
+        if full_heatmap_enabled and state.full_heatmap_renderer:
             state.full_heatmap_renderer.update(tracked, frame.shape)
 
-        if overlay.get("heatmap_full", overlay.get("heatmap", True)) and state.full_heatmap_renderer:
+        if full_heatmap_enabled and state.full_heatmap_renderer:
             state.full_heatmap_renderer.render(out)
         if heatmap_trails_enabled and state.heatmap_renderer:
             state.heatmap_renderer.render(out, current_ids)
@@ -547,34 +581,44 @@ class SharedInferenceManager:
                 smoothed_xyxy = tracked.xyxy
             tids = tracked.tracker_id
             class_ids = tracked.class_id
+            confs = getattr(tracked, "confidence", None)
 
             for i in range(len(tids)):
                 sx1, sy1, sx2, sy2 = smoothed_xyxy[i]
-                pw = (sx2 - sx1) * 0.05
-                ph = (sy2 - sy1) * 0.05
-                x1 = int(max(0, sx1 - pw))
-                y1 = int(max(0, sy1 - ph))
-                x2 = int(min(out.shape[1], sx2 + pw))
-                y2 = int(min(out.shape[0], sy2 + ph))
+                x1 = int(max(0, sx1))
+                y1 = int(max(0, sy1))
+                x2 = int(min(out.shape[1], sx2))
+                y2 = int(min(out.shape[0], sy2))
 
                 tid = tids[i]
                 pos = state.analytics.track_positions.get(tid) if state.analytics else None
                 spd_px = pos[2] if pos else 0.0
                 spd_cls = classify_speed(spd_px)
                 spd_color = _SPEED_COLORS[spd_cls]
-
-                cv2.rectangle(out, (x1, y1), (x2, y2), spd_color, 2)
+                vel_samples = 0
+                if state.analytics:
+                    vel_samples = int(state.analytics.track_velocity_samples.get(tid, 0))
 
                 cls_id = class_ids[i] if class_ids is not None and i < len(class_ids) else None
                 cls_name = state.class_names.get(int(cls_id), "obj") if cls_id is not None else "obj"
+                conf = float(confs[i]) if confs is not None and i < len(confs) else 0.0
                 if bbox_label_mode == "speed":
-                    label = f"{_SPEED_LABELS[spd_cls]}"
+                    if vel_samples < 1:
+                        label = f"#{int(tid)} {cls_name} TRACKING {conf:.2f}"
+                    else:
+                        label = f"#{int(tid)} {cls_name} {_SPEED_LABELS[spd_cls]} {conf:.2f}"
                 elif bbox_label_mode == "class":
-                    label = f"{cls_name}"
+                    label = f"#{int(tid)} {cls_name} {conf:.2f}"
                 else:
-                    label = f"{tid}"
+                    label = f"#{int(tid)} {conf:.2f}"
 
-                cv2.putText(out, label, (x1, max(10, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, spd_color, 2)
+                # Clean ByteTrack-like style: thin box + small tag.
+                box_color = (240, 210, 0) if (mode == "flow" and vel_samples < 1) else (spd_color if mode == "flow" else (0, 240, 220))
+                cv2.rectangle(out, (x1, y1), (x2, y2), box_color, 1, cv2.LINE_AA)
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.36, 1)
+                ty1 = max(0, y1 - th - 6)
+                cv2.rectangle(out, (x1, ty1), (min(out.shape[1] - 1, x1 + tw + 4), y1), box_color, -1)
+                cv2.putText(out, label, (x1 + 2, max(10, y1 - 3)), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (20, 20, 20), 1, cv2.LINE_AA)
 
         # Metrics
         if state.analytics:
@@ -592,16 +636,14 @@ class SharedInferenceManager:
                     pass
                 state.last_metrics_time = now
 
-        # Publish frame
+        # Publish frame as BGR; server handles one-time JPEG encode for API stream.
         try:
-            ret_enc, buffer = cv2.imencode(".jpg", out, self.encode_params)
-            if ret_enc:
-                if self.frame_queue.full():
-                    try:
-                        self.frame_queue.get_nowait()
-                    except Exception:
-                        pass
-                self.frame_queue.put_nowait((state.name, buffer.tobytes()))
+            if self.frame_queue.full():
+                try:
+                    self.frame_queue.get_nowait()
+                except Exception:
+                    pass
+            self.frame_queue.put_nowait((state.name, out))
         except Exception:
             pass
 
@@ -657,14 +699,12 @@ class SharedInferenceManager:
             state.last_metrics_time = now
 
         try:
-            ret_enc, buffer = cv2.imencode(".jpg", out, self.encode_params)
-            if ret_enc:
-                if self.frame_queue.full():
-                    try:
-                        self.frame_queue.get_nowait()
-                    except Exception:
-                        pass
-                self.frame_queue.put_nowait((state.name, buffer.tobytes()))
+            if self.frame_queue.full():
+                try:
+                    self.frame_queue.get_nowait()
+                except Exception:
+                    pass
+            self.frame_queue.put_nowait((state.name, out))
         except Exception:
             pass
 

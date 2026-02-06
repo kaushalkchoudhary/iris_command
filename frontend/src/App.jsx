@@ -8,8 +8,7 @@ import Footer from './components/Dashboard/Footer';
 import IRISLoader from './components/Dashboard/IRISLoader';
 import WelcomeScreen from './components/Dashboard/WelcomeScreen';
 import Login from './Login';
-import HLSVideo from './components/UI/HLSVideo';
-import { API_BASE_URL, WEBRTC_BASE, HLS_BASE } from './config';
+import { API_BASE_URL, WEBRTC_BASE } from './config';
 
 // ── MODE CONFIGURATION ──
 // Overlays are hardcoded in the backend per mode. Frontend only knows theme.
@@ -325,7 +324,13 @@ const MetricsHUD = ({ metrics, useCase, samResult }) => {
 // WebRTC WHEP player — connects to MediaMTX for RTSP streams
 // WebRTC WHEP hook — used for raw RTSP feeds from MediaMTX (instant, low-latency)
 const useWebRTC = (streamName, enabled = true, options = {}) => {
-  const { initialDelayMs = 0, retryDelayMs = 3000, readyUrl = null } = options;
+  const {
+    initialDelayMs = 0,
+    retryDelayMs = 3000,
+    readyUrl = null,
+    readyCheckIntervalMs = 1500,
+    readyTimeoutMs = 8000,
+  } = options;
   const videoRef = useRef(null);
   const pcRef = useRef(null);
   const [connected, setConnected] = useState(false);
@@ -339,7 +344,7 @@ const useWebRTC = (streamName, enabled = true, options = {}) => {
 
     const waitForReady = async () => {
       if (!readyUrl) return true;
-      const deadline = Date.now() + 15000;
+      const deadline = Date.now() + readyTimeoutMs;
       while (!cancelled && Date.now() < deadline) {
         try {
           const res = await fetch(readyUrl);
@@ -348,7 +353,7 @@ const useWebRTC = (streamName, enabled = true, options = {}) => {
             if (data.ready) return true;
           }
         } catch (e) { }
-        await new Promise(r => setTimeout(r, 800));
+        await new Promise(r => setTimeout(r, readyCheckIntervalMs));
       }
       return false;
     };
@@ -367,11 +372,11 @@ const useWebRTC = (streamName, enabled = true, options = {}) => {
       pcRef.current = pc;
 
       pc.addTransceiver('video', { direction: 'recvonly' });
-      pc.addTransceiver('audio', { direction: 'recvonly' });
 
       pc.ontrack = (e) => {
         if (videoRef.current && e.streams[0]) {
           videoRef.current.srcObject = e.streams[0];
+          videoRef.current.play().catch(() => { });
           if (!cancelled) setConnected(true);
         }
       };
@@ -424,7 +429,7 @@ const useWebRTC = (streamName, enabled = true, options = {}) => {
       }
       setConnected(false);
     };
-  }, [streamName, enabled, initialDelayMs, retryDelayMs]);
+  }, [streamName, enabled, initialDelayMs, retryDelayMs, readyUrl, readyCheckIntervalMs, readyTimeoutMs]);
 
   return { videoRef, connected };
 };
@@ -432,7 +437,6 @@ const useWebRTC = (streamName, enabled = true, options = {}) => {
 const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics }) => {
   const [isCellLoading, setIsCellLoading] = useState(true);
   const [rawPlaying, setRawPlaying] = useState(false);
-  const [rawHlsPlaying, setRawHlsPlaying] = useState(false);
   const [processedPlaying, setProcessedPlaying] = useState(false);
   const [samResult, setSamResult] = useState(null);
   const [reportLoading, setReportLoading] = useState(false);
@@ -473,7 +477,6 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
   // Phase 1: instant raw RTSP via WebRTC (RTSP only).
   const { videoRef: rawVideoRef, connected: rawConnected } = useWebRTC(video.id, !isUpload && !isFinished);
   const rawMjpegUrl = `${API_BASE_URL}/raw/${video.id}`;
-  const rawUploadHlsUrl = `${HLS_BASE}/${video.id}/index.m3u8`;
 
   // Phase 2: processed feed via WebRTC (libx264 baseline → RTSP → MediaMTX → WebRTC)
   const processedStreamName = `processed_${video.id}`;
@@ -483,16 +486,17 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
     processedStreamName,
     (isUpload || !isForensics) && !isFinished,
     {
-      initialDelayMs: 2000,
-      retryDelayMs: 3000,
+      initialDelayMs: 1200,
+      retryDelayMs: 2000,
       readyUrl: `${API_BASE_URL}/processed/${video.id}/ready`,
+      readyCheckIntervalMs: 1500,
+      readyTimeoutMs: 7000,
     }
   );
 
   // Prevent stale play-state from hiding all layers after mode/source switches.
   useEffect(() => {
     setRawPlaying(false);
-    setRawHlsPlaying(false);
     setProcessedPlaying(false);
     setHadAnyFrame(false);
     setIsCellLoading(true);
@@ -577,45 +581,14 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
         </div>
       </div>
 
-      {/* Layer 0: MJPEG raw fallback — fastest to appear */}
-      {isUpload ? (
-        <>
-          <div
-            className="absolute inset-0"
-            style={{
-              opacity: (showRawMjpeg && !showProcessed && !showForensicsResult) ? 1 : 0,
-              transition: 'opacity 0.5s ease',
-            }}
-          >
-            <HLSVideo
-              src={rawUploadHlsUrl}
-              onPlaying={() => { setRawHlsPlaying(true); setRawPlaying(true); setHadAnyFrame(true); }}
-              className="absolute inset-0 w-full h-full object-cover"
-            />
-          </div>
-          <img
-            src={rawMjpegUrl}
-            alt="IRIS Raw MJPEG"
-            onLoad={() => { setRawPlaying(true); setHadAnyFrame(true); }}
-            className="absolute inset-0 w-full h-full object-cover"
-            style={{
-              ...maskStyle,
-              opacity: (showRawMjpeg && !showProcessed && !showForensicsResult && !rawHlsPlaying) ? 1 : 0,
-              transition: 'opacity 0.5s ease',
-            }}
-          />
-        </>
-      ) : (
+      {/* Layer 0: MJPEG raw fallback — mount only when needed to avoid double-stream decode */}
+      {showRawMjpeg && !showProcessed && !showForensicsResult && (
         <img
           src={rawMjpegUrl}
           alt="IRIS Raw MJPEG"
           onLoad={() => { setRawPlaying(true); setHadAnyFrame(true); }}
           className="absolute inset-0 w-full h-full object-cover"
-          style={{
-            ...maskStyle,
-            opacity: (showRawMjpeg && !showProcessed && !showForensicsResult) ? 1 : 0,
-            transition: 'opacity 0.5s ease',
-          }}
+          style={maskStyle}
         />
       )}
 

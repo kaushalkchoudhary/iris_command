@@ -12,9 +12,10 @@ hls: yes
 hlsAddress: :8888
 hlsAllowOrigins: ['*']
 hlsVariant: lowLatency
+hlsAlwaysRemux: yes
 hlsSegmentCount: 7
 hlsSegmentDuration: 1s
-hlsPartDuration: 200ms
+hlsPartDuration: 250ms
 
 webrtc: yes
 webrtcAddress: :8889

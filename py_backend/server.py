@@ -129,6 +129,7 @@ metrics: Dict[str, dict] = {}
 frame_lock = threading.Condition()
 frame_buffer: Dict[str, bytes] = {}
 frame_sequences: Dict[str, int] = {}
+frame_bgr_buffer: Dict[str, np.ndarray] = {}
 
 raw_frame_lock = threading.Condition()
 raw_frame_buffer: Dict[str, bytes] = {}
@@ -160,6 +161,7 @@ MEDIAMTX_PUBLISH_BASE = os.environ.get(
     f"rtsp://127.0.0.1:{MEDIAMTX_RTSP_PORT}",
 )
 PROCESSED_FPS = int(os.environ.get("IRIS_PROCESSED_FPS", "30"))
+KEYFRAME_INTERVAL_SEC = int(os.environ.get("IRIS_KEYFRAME_INTERVAL_SEC", "1"))
 PROCESSED_BITRATE = os.environ.get("IRIS_PROCESSED_BITRATE", "12M")
 PROCESSED_MAXRATE = os.environ.get("IRIS_PROCESSED_MAXRATE", "16M")
 PROCESSED_BUFSIZE = os.environ.get("IRIS_PROCESSED_BUFSIZE", "10M")
@@ -172,6 +174,9 @@ MAX_RTSP_STREAMS = int(os.environ.get("IRIS_MAX_RTSP_STREAMS", "4"))
 MAX_UPLOAD_STREAMS = int(os.environ.get("IRIS_MAX_UPLOAD_STREAMS", "2"))
 USE_NVENC = os.environ.get("IRIS_USE_NVENC", "1") == "1"
 RAW_USE_NVENC = os.environ.get("IRIS_RAW_USE_NVENC", "0") == "1"
+# For uploaded files, publish raw via direct ffmpeg->MediaMTX low-latency transcode path.
+UPLOAD_RAW_PASSTHROUGH = os.environ.get("IRIS_UPLOAD_RAW_PASSTHROUGH", "0") == "1"
+PROCESSED_JPEG_ENCODE_PARAMS = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
 RAW_JPEG_ENCODE_PARAMS = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
 
 # Active mode tracking
@@ -179,7 +184,7 @@ active_mode: Optional[str] = None
 
 # Fixed overlay config per mode
 MODE_OVERLAYS = {
-    "congestion": {"heatmap": True, "heatmap_full": True, "heatmap_trails": False, "trails": False, "bboxes": False},
+    "congestion": {"heatmap": True, "heatmap_full": False, "heatmap_trails": True, "trails": False, "bboxes": False},
     "vehicle":    {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": True, "bbox_label": "class"},
     "flow":       {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": True,  "bboxes": True, "bbox_label": "speed"},
     "forensics":  {"heatmap": False, "heatmap_full": False, "heatmap_trails": False, "trails": False, "bboxes": False, "bbox_label": "class"},
@@ -187,7 +192,7 @@ MODE_OVERLAYS = {
 }
 
 MODE_CONFIDENCE = {
-    "congestion": 0.30,
+    "congestion": 0.20,
     "vehicle":    0.25,
     "flow":       0.20,
     "forensics":  0.20,
@@ -292,6 +297,19 @@ def _wait_for_frame(name: str, timeout: float = 5.0):
             frame_lock.wait(timeout=0.3)
     return None
 
+def _wait_for_frame_bgr(name: str, timeout: float = 5.0):
+    deadline = time.time() + timeout
+    with frame_lock:
+        last_seq = frame_sequences.get(name, 0)
+    while time.time() < deadline:
+        with frame_lock:
+            if frame_sequences.get(name, 0) > last_seq:
+                frame = frame_bgr_buffer.get(name)
+                if frame is not None:
+                    return frame
+            frame_lock.wait(timeout=0.3)
+    return None
+
 def _wait_for_raw_bgr_frame(name: str, timeout: float = 5.0):
     deadline = time.time() + timeout
     with raw_frame_lock:
@@ -308,39 +326,38 @@ def _wait_for_raw_bgr_frame(name: str, timeout: float = 5.0):
 
 def _ffmpeg_writer_worker(name: str, proc: subprocess.Popen, stop_event: threading.Event, width: int, height: int):
     last_seq = -1
+    last_frame = None
     frame_interval = 1.0 / PROCESSED_FPS
     next_send_time = time.monotonic()
     while not stop_event.is_set():
-        with frame_lock:
-            while frame_sequences.get(name, 0) <= last_seq and not stop_event.is_set():
-                frame_lock.wait(timeout=0.3)
-            seq = frame_sequences.get(name, 0)
-            data = frame_buffer.get(name)
-
-        if stop_event.is_set():
-            break
-        if not data or seq <= last_seq:
-            time.sleep(0.01)
-            continue
-
-        frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
-        last_seq = seq
-        if frame is None:
-            continue
-        if frame.shape[1] != width or frame.shape[0] != height:
-            print(f"[FFMPEG] Frame size changed for {name} ({width}x{height} -> {frame.shape[1]}x{frame.shape[0]}), restarting.")
-            break
-
-        # Rate-limit to match PROCESSED_FPS so FFmpeg timestamps stay in sync
+        # Rate-limit to match PROCESSED_FPS so FFmpeg timestamps stay in sync.
         now = time.monotonic()
         sleep_dur = next_send_time - now
         if sleep_dur > 0:
             time.sleep(sleep_dur)
         next_send_time = max(time.monotonic(), next_send_time) + frame_interval
 
+        with frame_lock:
+            seq = frame_sequences.get(name, 0)
+            frame = frame_bgr_buffer.get(name)
+
+        if stop_event.is_set():
+            break
+        if frame is not None and seq > last_seq:
+            if frame.shape[1] != width or frame.shape[0] != height:
+                print(f"[FFMPEG] Frame size changed for {name} ({width}x{height} -> {frame.shape[1]}x{frame.shape[0]}), restarting.")
+                break
+            last_frame = frame
+            last_seq = seq
+
+        if last_frame is None:
+            continue
+
         try:
-            proc.stdin.write(frame.tobytes())
-            proc.stdin.flush()
+            if proc.stdin is None:
+                print(f"[FFMPEG] Writer stdin unavailable for {name}, stopping writer loop.")
+                break
+            proc.stdin.write(last_frame.tobytes())
             ffmpeg_frame_sequences[name] = ffmpeg_frame_sequences.get(name, 0) + 1
         except BrokenPipeError:
             break
@@ -394,17 +411,13 @@ def _start_ffmpeg_publisher(name: str, wait_timeout: float = 8.0) -> bool:
     _stop_ffmpeg_publisher(name)
     rtsp_url = f"{MEDIAMTX_PUBLISH_BASE}/processed_{name}"
 
-    jpeg_data = _wait_for_frame(name, timeout=wait_timeout)
-    if not jpeg_data:
+    frame = _wait_for_frame_bgr(name, timeout=wait_timeout)
+    if frame is None:
         print(f"[FFMPEG] No frames available for {name}, skipping publisher start.")
         return False
 
-    frame = cv2.imdecode(np.frombuffer(jpeg_data, np.uint8), cv2.IMREAD_COLOR)
-    if frame is None:
-        print(f"[FFMPEG] Failed to decode first frame for {name}, skipping publisher start.")
-        return False
-
     height, width = frame.shape[:2]
+    gop = max(1, PROCESSED_FPS * KEYFRAME_INTERVAL_SEC)
     if USE_NVENC:
         encoder_args = [
             "-c:v", "h264_nvenc",
@@ -416,6 +429,7 @@ def _start_ffmpeg_publisher(name: str, wait_timeout: float = 8.0) -> bool:
             "-bufsize", PROCESSED_BUFSIZE,
             "-spatial-aq", "1",
             "-aq-strength", "8",
+            "-forced-idr", "1",
         ]
     else:
         encoder_args = [
@@ -425,6 +439,7 @@ def _start_ffmpeg_publisher(name: str, wait_timeout: float = 8.0) -> bool:
             "-b:v", PROCESSED_BITRATE,
             "-maxrate", PROCESSED_MAXRATE,
             "-bufsize", PROCESSED_BUFSIZE,
+            "-x264-params", f"keyint={gop}:min-keyint={gop}:scenecut=0",
         ]
 
     cmd = [
@@ -440,7 +455,7 @@ def _start_ffmpeg_publisher(name: str, wait_timeout: float = 8.0) -> bool:
         "-i", "pipe:0",
         "-vf", "format=yuv420p",
         *encoder_args,
-        "-g", str(PROCESSED_FPS * 2),
+        "-g", str(gop),
         "-bf", "0",
         "-threads", "1",
         "-f", "rtsp",
@@ -486,6 +501,7 @@ def _start_raw_ffmpeg_publisher(name: str, wait_timeout: float = 10.0) -> bool:
         return False
 
     height, width = frame.shape[:2]
+    gop = max(1, PROCESSED_FPS * KEYFRAME_INTERVAL_SEC)
     if RAW_USE_NVENC:
         encoder_args = [
             "-c:v", "h264_nvenc",
@@ -495,6 +511,7 @@ def _start_raw_ffmpeg_publisher(name: str, wait_timeout: float = 10.0) -> bool:
             "-b:v", RAW_BITRATE,
             "-maxrate", RAW_MAXRATE,
             "-bufsize", RAW_BUFSIZE,
+            "-forced-idr", "1",
         ]
     else:
         encoder_args = [
@@ -504,6 +521,7 @@ def _start_raw_ffmpeg_publisher(name: str, wait_timeout: float = 10.0) -> bool:
             "-b:v", RAW_BITRATE,
             "-maxrate", RAW_MAXRATE,
             "-bufsize", RAW_BUFSIZE,
+            "-x264-params", f"keyint={gop}:min-keyint={gop}:scenecut=0",
         ]
 
     cmd = [
@@ -519,7 +537,7 @@ def _start_raw_ffmpeg_publisher(name: str, wait_timeout: float = 10.0) -> bool:
         "-i", "pipe:0",
         "-vf", "format=yuv420p",
         *encoder_args,
-        "-g", str(PROCESSED_FPS * 2),
+        "-g", str(gop),
         "-bf", "0",
         "-threads", "1",
         "-f", "rtsp",
@@ -561,6 +579,67 @@ def _start_raw_ffmpeg_publisher_async(name: str):
             if _start_raw_ffmpeg_publisher(name):
                 return
             time.sleep(1.5)
+    threading.Thread(target=_run, daemon=True).start()
+
+def _start_upload_raw_passthrough_publisher(name: str, file_path: str) -> bool:
+    """Publish upload file directly to MediaMTX raw path with low-latency transcode."""
+    _stop_raw_ffmpeg_publisher(name)
+    rtsp_url = f"{MEDIAMTX_PUBLISH_BASE}/{name}"
+    gop = max(1, PROCESSED_FPS * KEYFRAME_INTERVAL_SEC)
+
+    cmd = [
+        "ffmpeg",
+        "-nostdin",
+        "-loglevel", "warning",
+        "-re",
+        "-stream_loop", "-1",
+        "-fflags", "nobuffer",
+        "-flags", "low_delay",
+        "-i", file_path,
+        "-map", "0:v:0",
+        "-an",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-tune", "zerolatency",
+        "-pix_fmt", "yuv420p",
+        "-g", str(gop),
+        "-keyint_min", str(gop),
+        "-sc_threshold", "0",
+        "-b:v", RAW_BITRATE,
+        "-maxrate", RAW_MAXRATE,
+        "-bufsize", RAW_BUFSIZE,
+        "-f", "rtsp",
+        "-rtsp_transport", "tcp",
+        rtsp_url,
+    ]
+
+    try:
+        ffmpeg_log_path = env_log_path("ffmpeg") or (new_log_path("ffmpeg").parent / "ffmpeg.log")
+        ffmpeg_log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file = open(ffmpeg_log_path, "a", buffering=1)
+        raw_ffmpeg_log_files[name] = log_file
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=log_file,
+            stderr=log_file,
+            start_new_session=True,
+        )
+        raw_ffmpeg_publishers[name] = proc
+        stop_event = threading.Event()
+        raw_ffmpeg_stop_events[name] = stop_event
+        print(f"[FFMPEG RAW] Started upload low-latency transcode for {name} -> {name} (pid={proc.pid})")
+        return True
+    except Exception as e:
+        print(f"[FFMPEG RAW] Failed upload low-latency transcode for {name}: {e}")
+        return False
+
+def _start_upload_raw_passthrough_async(name: str, file_path: str):
+    def _run():
+        for _ in range(3):
+            if _start_upload_raw_passthrough_publisher(name, file_path):
+                return
+            time.sleep(1.0)
     threading.Thread(target=_run, daemon=True).start()
 
 def _start_ffmpeg_publisher_async(name: str):
@@ -774,15 +853,38 @@ def update_metrics(stream: str, data: dict):
         # Suppress standard metrics data store in Forensics mode
         return
 
+    # Ensure UI can consume metrics as soon as any valid payload arrives.
+    with source_lock:
+        for info in running_sources.values():
+            if info.get("name") == stream:
+                info["started_processing"] = True
+    with upload_sources_lock:
+        info = upload_sources.get(stream)
+        if info:
+            info["started_processing"] = True
+            if not info.get("started_at"):
+                info["started_at"] = time.time()
+
     with metrics_lock:
+        if stream_mode and "mode" not in data:
+            data = {**data, "mode": stream_mode}
         metrics[stream] = data
 
-def update_frame(stream: str, jpeg_data: bytes):
-    if not isinstance(jpeg_data, (bytes, bytearray)):
-        print(f"[ERROR] frame_buffer received {type(jpeg_data)} for {stream}, expected bytes")
+def update_frame(stream: str, frame: np.ndarray):
+    if frame is None or not isinstance(frame, np.ndarray):
         return
+
+    try:
+        ret_enc, buffer = cv2.imencode(".jpg", frame, PROCESSED_JPEG_ENCODE_PARAMS)
+        if not ret_enc:
+            return
+        jpeg_data = buffer.tobytes()
+    except Exception:
+        return
+
     with frame_lock:
         frame_buffer[stream] = jpeg_data
+        frame_bgr_buffer[stream] = frame
         frame_sequences[stream] = frame_sequences.get(stream, 0) + 1
         frame_lock.notify_all()
 
@@ -819,18 +921,7 @@ def update_raw_frame(stream: str, frame: np.ndarray):
 def get_all_metrics():
     with metrics_lock:
         raw_m = metrics.copy()
-    
-    m = {}
-    # Only return metrics if processing has actually started
-    with source_lock:
-        active_names = {info.get("name"): info.get("started_processing", False) for info in running_sources.values()}
-    with upload_sources_lock:
-        for name, info in upload_sources.items():
-            active_names[name] = info.get("started_processing", False)
-
-    for name, data in raw_m.items():
-        if active_names.get(name):
-            m[name] = data
+    m = dict(raw_m)
 
     # Merge RTSP start times
     with source_lock:
@@ -850,7 +941,7 @@ def get_all_metrics():
                 m[name] = {}
             dur = info.get("duration", 0.0)
             if dur > 0:
-                m["total_duration"] = dur
+                m[name]["total_duration"] = dur
 
     return m
 
@@ -1013,6 +1104,7 @@ def _stop_all_sources():
         overlays.clear()
     with frame_lock:
         frame_buffer.clear()
+        frame_bgr_buffer.clear()
         frame_sequences.clear()
     with raw_frame_lock:
         raw_frame_buffer.clear()
@@ -1178,9 +1270,25 @@ def set_overlay(name: str, update: OverlayUpdate):
             new_state["active_mode"] = cur.get("active_mode")
         if "bbox_label" in cur:
             new_state["bbox_label"] = cur.get("bbox_label")
-        if cur.get("active_mode") == "congestion":
-            # Congestion mode is heatmap-only.
+        # Keep heatmap children coherent.
+        if not new_state["heatmap"]:
+            new_state["heatmap_full"] = False
             new_state["heatmap_trails"] = False
+        else:
+            # Turning heatmap back on should re-enable per-vehicle heat layer by default
+            # unless caller explicitly controls heatmap_trails.
+            if update.heatmap is True and update.heatmap_trails is None:
+                new_state["heatmap_trails"] = True
+            if update.heatmap_full:
+                new_state["heatmap"] = True
+                if update.heatmap_trails is None:
+                    new_state["heatmap_trails"] = False
+            if update.heatmap_full is False and update.heatmap_trails is None:
+                new_state["heatmap_trails"] = True
+            if update.heatmap_trails:
+                new_state["heatmap"] = True
+        if cur.get("active_mode") == "congestion":
+            # Congestion mode: only heatmaps, no trails/boxes.
             new_state["trails"] = False
             new_state["bboxes"] = False
         overlays[name] = dict(new_state)
@@ -1369,6 +1477,7 @@ def stop_source(req: SourceIndexRequest):
             overlays.pop(name, None)
         with frame_lock:
             frame_buffer.pop(name, None)
+            frame_bgr_buffer.pop(name, None)
             frame_sequences.pop(name, 0)
         with raw_frame_lock:
             raw_frame_buffer.pop(name, None)
@@ -1693,6 +1802,7 @@ def _stop_all_uploads(delete_files: bool = False):
     with frame_lock:
         for name in names:
             frame_buffer.pop(name, None)
+            frame_bgr_buffer.pop(name, None)
             frame_sequences.pop(name, 0)
     with raw_frame_lock:
         for name in names:
@@ -1729,6 +1839,7 @@ def _stop_upload_by_name(name: str, delete_file: bool = False):
         overlays.pop(name, None)
     with frame_lock:
         frame_buffer.pop(name, None)
+        frame_bgr_buffer.pop(name, None)
         frame_sequences.pop(name, 0)
     with raw_frame_lock:
         raw_frame_buffer.pop(name, None)
@@ -1798,7 +1909,10 @@ async def upload_video(file: UploadFile = File(...), mode: Optional[str] = Form(
     process, stop = start_upload_callback(str(target), name, overlay_config, is_crowd_mode, active_streams, realtime=True)
     if process is None:
         raise HTTPException(500, "Failed to start upload inference")
-    _start_raw_ffmpeg_publisher_async(name)
+    if UPLOAD_RAW_PASSTHROUGH:
+        _start_upload_raw_passthrough_async(name, str(target))
+    else:
+        _start_raw_ffmpeg_publisher_async(name)
 
     with upload_sources_lock:
         upload_sources[name] = {
@@ -1887,7 +2001,10 @@ def restart_upload(name: str):
     process, stop = start_upload_callback(file_path, name, overlay_config, is_crowd_mode, active_streams, realtime=True)
     if process is None:
         raise HTTPException(500, "Failed to restart upload inference")
-    _start_raw_ffmpeg_publisher_async(name)
+    if UPLOAD_RAW_PASSTHROUGH:
+        _start_upload_raw_passthrough_async(name, file_path)
+    else:
+        _start_raw_ffmpeg_publisher_async(name)
 
     with upload_sources_lock:
         upload_sources[name] = {

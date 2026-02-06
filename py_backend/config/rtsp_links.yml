@@ -1,4 +1,12 @@
-overlays: {}
+overlays:
+  upload1:
+    heatmap: true
+    heatmap_full: false
+    heatmap_trails: true
+    trails: false
+    bboxes: false
+    confidence: 0.2
+    active_mode: congestion
 rtsp_links:
 - rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone1
 - rtsp://bcp:bcp123@57.159.25.115:8554/bcpdrone2

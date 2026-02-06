@@ -116,12 +116,15 @@ const OverlayToggles = ({ selectedVideos = [], accentColor = 'cyan', useCase = '
     heatmap_full: true,
   });
   const [isUpdating, setIsUpdating] = useState(false);
+  const selectedVideoIds = selectedVideos.map(v => v.id).filter(Boolean);
+  const selectedVideoKey = selectedVideoIds.join(',');
 
   useEffect(() => {
-    if (selectedVideos.length === 0) return;
+    if (selectedVideoIds.length === 0) return;
+    const controller = new AbortController();
     const fetchOverlay = async () => {
       try {
-        const res = await fetch(`${API_BASE_URL}/overlays/${selectedVideos[0].id}`);
+        const res = await fetch(`${API_BASE_URL}/overlays/${selectedVideoIds[0]}`, { signal: controller.signal });
         if (res.ok) {
           const data = await res.json();
           setOverlay({
@@ -129,28 +132,38 @@ const OverlayToggles = ({ selectedVideos = [], accentColor = 'cyan', useCase = '
             heatmap_full: data.heatmap_full ?? true,
           });
         }
-      } catch (e) {}
+      } catch (e) {
+        if (e?.name !== 'AbortError') {
+          console.error('Failed to fetch overlay:', e);
+        }
+      }
     };
     fetchOverlay();
-  }, [selectedVideos]);
+    return () => controller.abort();
+  }, [selectedVideoKey]);
 
   const updateOverlay = useCallback(async (updates) => {
+    if (selectedVideoIds.length === 0) return;
     setIsUpdating(true);
     try {
-      await Promise.all(
-        selectedVideos.map(v =>
-          fetch(`${API_BASE_URL}/overlays/${v.id}`, {
+      const responses = await Promise.all(
+        selectedVideoIds.map(id =>
+          fetch(`${API_BASE_URL}/overlays/${id}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(updates),
           })
         )
       );
+      const failed = responses.some(r => !r.ok);
+      if (failed) {
+        throw new Error('Overlay update failed on one or more sources');
+      }
     } catch (e) {
       console.error('Failed to update overlay:', e);
     }
     setIsUpdating(false);
-  }, [selectedVideos]);
+  }, [selectedVideoKey]);
 
   const toggle = (key) => {
     const next = !overlay[key];
@@ -168,7 +181,7 @@ const OverlayToggles = ({ selectedVideos = [], accentColor = 'cyan', useCase = '
     updateOverlay(updates);
   };
 
-  if (selectedVideos.length === 0) return null;
+  if (selectedVideoIds.length === 0) return null;
 
   const toggleItems = [
     { key: 'heatmap', label: 'Heatmap' },
