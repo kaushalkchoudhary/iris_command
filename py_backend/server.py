@@ -124,6 +124,7 @@ alerts_lock = threading.Lock()
 alerts: deque = deque(maxlen=50)
 alert_cooldowns: Dict[str, float] = {}
 ALERT_COOLDOWN_SECONDS = 15
+ALERT_TRIGGER_THRESHOLD = 70
 
 overlay_lock = threading.Lock()
 overlays: Dict[str, Dict[str, bool]] = {}
@@ -1222,6 +1223,9 @@ def get_all_metrics():
 # ── Alert management ──
 
 def add_alert(source: str, congestion: int, metrics_data: dict, screenshot_data: bytes):
+    if congestion < ALERT_TRIGGER_THRESHOLD:
+        return None
+
     with alerts_lock:
         now = time.time()
 
@@ -1234,16 +1238,28 @@ def add_alert(source: str, congestion: int, metrics_data: dict, screenshot_data:
         alert_id = f"{source}_{int(now * 1000)}"
         screenshot_path = ALERTS_DIR / f"{alert_id}.jpg"
 
+        # Alert screenshots must come from processed frames (not raw stream frames).
+        # Use queue payload only as a fallback if processed cache is not yet available.
+        with frame_lock:
+            processed_screenshot = frame_buffer.get(source)
+        final_screenshot = (
+            bytes(processed_screenshot)
+            if isinstance(processed_screenshot, (bytes, bytearray)) and processed_screenshot
+            else (bytes(screenshot_data) if isinstance(screenshot_data, (bytes, bytearray)) and screenshot_data else None)
+        )
+        if not final_screenshot:
+            return None
+
         try:
             with open(screenshot_path, "wb") as f:
-                f.write(screenshot_data)
+                f.write(final_screenshot)
         except Exception as e:
             print(f"[ALERT] Failed to save screenshot: {e}")
             return None
 
-        if congestion >= 60:
+        if congestion >= 85:
             severity = "critical"
-        elif congestion >= 40:
+        elif congestion >= ALERT_TRIGGER_THRESHOLD:
             severity = "high"
         else:
             severity = "medium"
@@ -2626,7 +2642,7 @@ def run_control_server(start_source_fn, start_upload_fn, initial_overlays):
                 path = record.args[2]
                 
                 if status_code == 200:
-                    if "/api/health" in path or "/api/metrics" in path:
+                    if "/api/health" in path:
                         return False
                     if "/api/sam/result/" in path or "/api/sam/status" in path:
                          return False

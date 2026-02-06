@@ -1516,6 +1516,13 @@ const CongestionPanel = ({ selectedVideos = [], alerts = [], onSelectAlert }) =>
   }, []);
 
   const sourceIds = selectedVideos.map(v => v.id);
+  let sumCongestion = 0;
+  let sumDensity = 0;
+  let sumMobility = 0;
+  let sumVehicles = 0;
+  let metricSources = 0;
+  let sumHotRegionCongestion = 0;
+  let hotRegionCount = 0;
 
   // Aggregate hot regions across sources
   let allRegions = [];
@@ -1525,6 +1532,18 @@ const CongestionPanel = ({ selectedVideos = [], alerts = [], onSelectAlert }) =>
   if (metrics) {
     for (const src of sourceIds) {
       const m = metrics[src];
+      if (!m) continue;
+      const congestionVal = Number(m.congestion_index ?? m.risk_score ?? 0) || 0;
+      const densityVal = Number(m.traffic_density ?? m.crowd_density ?? m.avg_density ?? 0) || 0;
+      // Fallback mobility from inverse density when explicit mobility is absent.
+      const mobilityVal = Number(m.mobility_index ?? Math.max(0, 100 - densityVal)) || 0;
+      const vehicleVal = Number(m.current_detection_count ?? m.detection_count ?? m.crowd_count ?? 0) || 0;
+      sumCongestion += congestionVal;
+      sumDensity += densityVal;
+      sumMobility += mobilityVal;
+      sumVehicles += vehicleVal;
+      metricSources += 1;
+
       if (!m?.hot_regions) continue;
       const hr = m.hot_regions;
       totalActive += hr.active_count || 0;
@@ -1534,6 +1553,13 @@ const CongestionPanel = ({ selectedVideos = [], alerts = [], onSelectAlert }) =>
         sevCounts.LOW += hr.severity_counts.LOW || 0;
       }
       if (hr.regions) {
+        for (const r of hr.regions) {
+          const rc = Number(r.avg_congestion ?? 0) || 0;
+          if (rc > 0) {
+            sumHotRegionCongestion += rc;
+            hotRegionCount += 1;
+          }
+        }
         allRegions = allRegions.concat(hr.regions.map(r => ({ ...r, source: src })));
       }
     }
@@ -1543,6 +1569,10 @@ const CongestionPanel = ({ selectedVideos = [], alerts = [], onSelectAlert }) =>
   const sevOrder = { HIGH: 0, MODERATE: 1, LOW: 2 };
   allRegions.sort((a, b) => (sevOrder[a.severity] || 3) - (sevOrder[b.severity] || 3));
   const topRegions = allRegions.slice(0, 8);
+  const avgCongestion = metricSources > 0 ? Math.round(sumCongestion / metricSources) : 0;
+  const avgDensity = metricSources > 0 ? Math.round(sumDensity / metricSources) : 0;
+  const avgMobility = metricSources > 0 ? Math.round(sumMobility / metricSources) : 0;
+  const avgHotRegionCongestion = hotRegionCount > 0 ? Math.round(sumHotRegionCongestion / hotRegionCount) : 0;
 
   const hasRegions = totalActive > 0;
 
@@ -1576,6 +1606,34 @@ const CongestionPanel = ({ selectedVideos = [], alerts = [], onSelectAlert }) =>
           {/* Confidence Control */}
           <ConfidenceControl selectedVideos={selectedVideos} accentColor="cyan" />
           <OverlayToggles selectedVideos={selectedVideos} accentColor="red" />
+
+          {/* Core metrics summary */}
+          <div className="grid grid-cols-2 gap-1.5">
+            <div className="bg-black/50 border border-cyan-500/20 p-2.5">
+              <div className="text-[8px] text-cyan-400/60 uppercase font-bold tracking-wider">Congestion</div>
+              <div className="text-xl font-black text-cyan-300 leading-none mt-1">{avgCongestion}%</div>
+            </div>
+            <div className="bg-black/50 border border-orange-500/20 p-2.5">
+              <div className="text-[8px] text-orange-400/60 uppercase font-bold tracking-wider">Density</div>
+              <div className="text-xl font-black text-orange-300 leading-none mt-1">{avgDensity}%</div>
+            </div>
+            <div className="bg-black/50 border border-emerald-500/20 p-2.5">
+              <div className="text-[8px] text-emerald-400/60 uppercase font-bold tracking-wider">Mobility</div>
+              <div className="text-xl font-black text-emerald-300 leading-none mt-1">{avgMobility}</div>
+            </div>
+            <div className="bg-black/50 border border-white/15 p-2.5">
+              <div className="text-[8px] text-white/50 uppercase font-bold tracking-wider">Vehicles</div>
+              <div className="text-xl font-black text-white/80 leading-none mt-1">{sumVehicles}</div>
+            </div>
+            <div className="bg-black/50 border border-red-500/20 p-2.5">
+              <div className="text-[8px] text-red-400/60 uppercase font-bold tracking-wider">Hot Zones</div>
+              <div className="text-xl font-black text-red-300 leading-none mt-1">{totalActive}</div>
+            </div>
+            <div className="bg-black/50 border border-amber-500/20 p-2.5">
+              <div className="text-[8px] text-amber-400/60 uppercase font-bold tracking-wider">Hotspot Avg</div>
+              <div className="text-xl font-black text-amber-300 leading-none mt-1">{avgHotRegionCongestion}%</div>
+            </div>
+          </div>
 
           {/* Severity summary cards */}
           <div className="grid grid-cols-3 gap-1.5">
