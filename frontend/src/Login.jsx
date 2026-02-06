@@ -38,13 +38,17 @@ const Login = ({ onLogin }) => {
         body: JSON.stringify({ username, password }),
       });
 
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
 
       if (response.ok && data.success) {
         localStorage.setItem('iris_username', data.username || username);
+        if (data.token) {
+          sessionStorage.setItem('iris_auth_token', data.token);
+          localStorage.removeItem('iris_auth_token');
+        }
         onLogin();
       } else {
-        setError(data.error || 'Invalid credentials');
+        setError(data.error || data.detail || 'Invalid credentials');
       }
     } catch {
       setError('Connection error');

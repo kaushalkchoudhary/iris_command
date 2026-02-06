@@ -266,6 +266,14 @@ start_inference() {
     IRIS_FULL_HEATMAP_BLUR=17 \
     IRIS_FULL_HEATMAP_ALPHA=0.40 \
     IRIS_FULL_HEATMAP_COLORMAP=JET \
+    IRIS_CROWD_TARGET_SIZE=1024 \
+    IRIS_CROWD_NOISE_FLOOR_PCT=70 \
+    IRIS_CROWD_HOTSPOT_HI_PCT=99.5 \
+    IRIS_CROWD_GREEN_SUPPRESS=0.55 \
+    IRIS_CROWD_MOTION_SUPPRESS=0.35 \
+    IRIS_CROWD_MIN_COMPONENT_RATIO=0.00008 \
+    IRIS_CROWD_CCN_FPS=1.0 \
+    IRIS_CROWD_COUNT_MULTIPLIER=1.8 \
     OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp|buffer_size;262144|analyzeduration;50000|probesize;50000|fflags;nobuffer|flags;low_delay" \
     "$PYTHON_BIN" -u app.py >> "$BACKEND_LOG" 2>&1 &
 
@@ -330,8 +338,16 @@ case "$1" in
             warn "Detected partially running services; cleaning up before start"
             stop_services
         fi
-        start_mediamtx
-        start_inference
+        if ! start_mediamtx; then
+            error "Aborting start: MediaMTX is not running. Check $MEDIAMTX_LOG"
+            status
+            exit 1
+        fi
+        if ! start_inference; then
+            error "Backend failed to start. Check $BACKEND_LOG"
+            status
+            exit 1
+        fi
         status
         ;;
     stop)
@@ -340,8 +356,16 @@ case "$1" in
         ;;
     restart)
         stop_services
-        start_mediamtx
-        start_inference
+        if ! start_mediamtx; then
+            error "Aborting restart: MediaMTX is not running. Check $MEDIAMTX_LOG"
+            status
+            exit 1
+        fi
+        if ! start_inference; then
+            error "Backend failed to start. Check $BACKEND_LOG"
+            status
+            exit 1
+        fi
         status
         ;;
     status)

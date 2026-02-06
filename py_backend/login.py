@@ -46,6 +46,17 @@ def init_db():
     )
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS api_sessions (
+        token     TEXT PRIMARY KEY,
+        username  TEXT NOT NULL,
+        ip        TEXT NOT NULL,
+        tab_id    TEXT NOT NULL,
+        created   INTEGER NOT NULL,
+        last_seen INTEGER NOT NULL
+    )
+    """)
+
     # Seed default users if table is empty
     cur.execute("SELECT COUNT(*) FROM users")
     if cur.fetchone()[0] == 0:
@@ -144,6 +155,64 @@ def list_users() -> list:
     rows = cur.fetchall()
     conn.close()
     return [{"username": r[0], "created": r[1]} for r in rows]
+
+
+def create_session(token: str, username: str, ip: str, tab_id: str, now_ts: int) -> None:
+    conn = _get_conn()
+    cur = conn.cursor()
+    # One active session per user by default.
+    cur.execute("DELETE FROM api_sessions WHERE username = ?", (username,))
+    cur.execute(
+        "INSERT OR REPLACE INTO api_sessions (token, username, ip, tab_id, created, last_seen) VALUES (?, ?, ?, ?, ?, ?)",
+        (token, username, ip, tab_id, now_ts, now_ts),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_session(token: str) -> dict | None:
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT token, username, ip, tab_id, created, last_seen FROM api_sessions WHERE token = ?",
+        (token,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "token": row[0],
+        "username": row[1],
+        "ip": row[2],
+        "tab_id": row[3],
+        "created_at": float(row[4]),
+        "last_seen": float(row[5]),
+    }
+
+
+def touch_session(token: str, now_ts: int) -> None:
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE api_sessions SET last_seen = ? WHERE token = ?", (now_ts, token))
+    conn.commit()
+    conn.close()
+
+
+def delete_session(token: str) -> None:
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM api_sessions WHERE token = ?", (token,))
+    conn.commit()
+    conn.close()
+
+
+def purge_expired_sessions(ttl_seconds: int, now_ts: int) -> None:
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM api_sessions WHERE (? - last_seen) > ?", (now_ts, ttl_seconds))
+    conn.commit()
+    conn.close()
 
 
 # Auto-init on import

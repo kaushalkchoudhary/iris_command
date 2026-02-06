@@ -78,20 +78,17 @@ Logs are written to `../logs/inference.log` and `../logs/mediamtx.log`.
 ### Systemd (persistent service)
 
 ```bash
-# Install service files
-sudo cp service/iris-backend.service /etc/systemd/system/
-sudo cp service/iris-mediamtx.service /etc/systemd/system/
-sudo systemctl daemon-reload
+# Optional: tune runtime/GPU/session limits first.
+sudo cp service/iris-command.env /etc/default/iris-command
+sudo nano /etc/default/iris-command
 
-# Enable and start
-sudo systemctl enable iris-mediamtx iris-backend
-sudo systemctl start iris-mediamtx
-sudo systemctl start iris-backend
+# Install + enable + restart both services.
+sudo service/install_systemd.sh
 
 # Management
-sudo systemctl status iris-backend
+sudo systemctl status iris-mediamtx iris-backend
 sudo systemctl restart iris-backend
-journalctl -u iris-backend -f     # follow logs
+journalctl -u iris-mediamtx -u iris-backend -f
 ```
 
 **Note:** If you previously had the old `inference.py`-based service installed, re-copy `iris-backend.service` to `/etc/systemd/system/` and run `sudo systemctl daemon-reload` to pick up the new `app.py` entry point.

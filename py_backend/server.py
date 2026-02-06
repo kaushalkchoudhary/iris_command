@@ -10,6 +10,8 @@ import subprocess
 import json
 import logging
 import asyncio
+import math
+import re
 from typing import Dict, List, Optional
 from pathlib import Path
 from collections import deque
@@ -20,12 +22,15 @@ import requests as http_requests
 import numpy as np
 import cv2
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from login import login_user, add_user, delete_user, change_password, list_users
+from login import (
+    login_user, add_user, delete_user, change_password, list_users,
+    create_session, get_session, touch_session, delete_session, purge_expired_sessions,
+)
 from sam import (
     load_sam_model, sam_annotate_frame, sam_worker,
     sam_model_loaded, sam_results_lock, sam_results, sam_threads,
@@ -149,6 +154,8 @@ ffmpeg_writer_threads: Dict[str, threading.Thread] = {}
 ffmpeg_stop_events: Dict[str, threading.Event] = {}
 ffmpeg_next_start: Dict[str, float] = {}
 ffmpeg_frame_sequences: Dict[str, int] = {}
+ffmpeg_state_lock = threading.Lock()
+ffmpeg_starting: set = set()
 raw_ffmpeg_publishers: Dict[str, subprocess.Popen] = {}
 raw_ffmpeg_log_files: Dict[str, object] = {}
 raw_ffmpeg_writer_threads: Dict[str, threading.Thread] = {}
@@ -208,16 +215,170 @@ start_upload_callback = None
 frontend_log_lock = threading.Lock()
 frontend_log_file = None
 
+# ── Auth/session state ──
+
+auth_lock = threading.Lock()
+auth_sessions: Dict[str, dict] = {}
+auth_user_token: Dict[str, str] = {}
+allowed_ips_last_seen: Dict[str, float] = {}
+AUTH_IDLE_TTL_SECONDS = int(os.environ.get("IRIS_AUTH_IDLE_TTL_SECONDS", "1800"))
+AUTH_MAX_IPS = int(os.environ.get("IRIS_AUTH_MAX_IPS", "2"))
+AUTH_PUBLIC_PATHS = {
+    "/api/login",
+    "/api/health",
+    "/api/logs/frontend",
+}
+
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "https://iriscmd.stagingbot.xyz",
+    "https://drone.magicboxhub.net",
+]
+_cors_origins_raw = os.environ.get("IRIS_CORS_ORIGINS", ",".join(DEFAULT_CORS_ORIGINS))
+CORS_ORIGINS = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+MAGICBOXHUB_ORIGIN_RE = re.compile(r"^https://([a-zA-Z0-9-]+\.)*magicboxhub\.net$")
+
+
+def _client_ip_from_request(request: Request) -> str:
+    xfwd = request.headers.get("x-forwarded-for", "").strip()
+    if xfwd:
+        ip = xfwd.split(",")[0].strip()
+        if ip:
+            return ip
+    xreal = request.headers.get("x-real-ip", "").strip()
+    if xreal:
+        return xreal
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def _extract_bearer_token(request: Request) -> str:
+    authz = request.headers.get("authorization", "").strip()
+    if authz.lower().startswith("bearer "):
+        return authz[7:].strip()
+    fallback = request.headers.get("x-auth-token", "").strip()
+    if fallback:
+        return fallback
+    q = request.query_params.get("auth_token", "").strip()
+    return q
+
+
+def _purge_stale_auth(now: Optional[float] = None):
+    if now is None:
+        now = time.time()
+    purge_expired_sessions(AUTH_IDLE_TTL_SECONDS, int(now))
+    stale_tokens = []
+    for token, sess in list(auth_sessions.items()):
+        last_seen = float(sess.get("last_seen", 0.0))
+        if now - last_seen > AUTH_IDLE_TTL_SECONDS:
+            stale_tokens.append((token, sess.get("username")))
+    for token, username in stale_tokens:
+        auth_sessions.pop(token, None)
+        if username and auth_user_token.get(username) == token:
+            auth_user_token.pop(username, None)
+
+    for ip, last_seen in list(allowed_ips_last_seen.items()):
+        if now - float(last_seen) > AUTH_IDLE_TTL_SECONDS:
+            allowed_ips_last_seen.pop(ip, None)
+
+
+def _register_ip_or_raise(ip: str):
+    now = time.time()
+    _purge_stale_auth(now)
+    if ip in allowed_ips_last_seen:
+        allowed_ips_last_seen[ip] = now
+        return
+    if len(allowed_ips_last_seen) >= AUTH_MAX_IPS:
+        raise HTTPException(403, f"Maximum distinct client IPs reached ({AUTH_MAX_IPS}).")
+    allowed_ips_last_seen[ip] = now
+
+
+def _is_origin_allowed(origin: str) -> bool:
+    if not origin:
+        return False
+    if origin in CORS_ORIGINS:
+        return True
+    return bool(MAGICBOXHUB_ORIGIN_RE.match(origin))
+
+
+def _cors_headers_for_request(request: Request) -> Dict[str, str]:
+    origin = request.headers.get("origin", "").strip()
+    if _is_origin_allowed(origin):
+        return {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Methods": "*",
+            "Access-Control-Allow-Headers": "*",
+            "Vary": "Origin",
+        }
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "*",
+        "Access-Control-Allow-Headers": "*",
+    }
+
 
 # ── RTSP config helpers ──
+
+def _extract_rtsp_links_from_mediamtx_cfg() -> List[str]:
+    """Best-effort fallback: derive RTSP source URLs from MediaMTX path config."""
+    mediamtx_cfg_path = Path("config/mediamtx.yml")
+    if not mediamtx_cfg_path.exists():
+        return []
+    try:
+        with open(mediamtx_cfg_path, "r") as f:
+            cfg = yaml.safe_load(f) or {}
+    except Exception:
+        return []
+
+    paths = cfg.get("paths", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(paths, dict):
+        return []
+
+    out = []
+    for _, p in paths.items():
+        if not isinstance(p, dict):
+            continue
+        src = str(p.get("source", "")).strip()
+        if src.startswith("rtsp://"):
+            out.append(src)
+    return out
+
+
+def _normalize_rtsp_config(cfg: dict | None) -> dict:
+    if not isinstance(cfg, dict):
+        cfg = {}
+    links = cfg.get("rtsp_links")
+    active = cfg.get("active_sources")
+    overlays_cfg = cfg.get("overlays")
+
+    if not isinstance(links, list):
+        links = []
+    if not isinstance(active, list):
+        active = []
+    if not isinstance(overlays_cfg, dict):
+        overlays_cfg = {}
+
+    # Auto-heal: if rtsp_links disappeared, recover from mediamtx path sources.
+    if not links:
+        recovered = _extract_rtsp_links_from_mediamtx_cfg()
+        if recovered:
+            print(f"[CONFIG] Recovered {len(recovered)} rtsp_links from config/mediamtx.yml")
+            links = recovered
+
+    return {"rtsp_links": links, "active_sources": active, "overlays": overlays_cfg}
+
 
 def load_rtsp_config():
     if not RTSP_CONFIG_PATH.exists():
         return {"rtsp_links": [], "active_sources": [], "overlays": {}}
     with open(RTSP_CONFIG_PATH, "r") as f:
-        return yaml.safe_load(f) or {}
+        raw = yaml.safe_load(f) or {}
+    return _normalize_rtsp_config(raw)
 
 def save_rtsp_config(cfg):
+    cfg = _normalize_rtsp_config(cfg)
     with open(RTSP_CONFIG_PATH, "w") as f:
         yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
 
@@ -408,12 +569,24 @@ def _raw_ffmpeg_writer_worker(name: str, proc: subprocess.Popen, stop_event: thr
 
 
 def _start_ffmpeg_publisher(name: str, wait_timeout: float = 8.0) -> bool:
-    _stop_ffmpeg_publisher(name)
+    with ffmpeg_state_lock:
+        if name in ffmpeg_starting:
+            return False
+        existing = ffmpeg_publishers.get(name)
+        if existing is not None and existing.poll() is None:
+            return True
+        ffmpeg_starting.add(name)
+
+    # Keep the in-flight "starting" marker while replacing any stale publisher
+    # so concurrent start attempts can't race and spawn duplicates.
+    _stop_ffmpeg_publisher(name, clear_starting=False)
     rtsp_url = f"{MEDIAMTX_PUBLISH_BASE}/processed_{name}"
 
     frame = _wait_for_frame_bgr(name, timeout=wait_timeout)
     if frame is None:
         print(f"[FFMPEG] No frames available for {name}, skipping publisher start.")
+        with ffmpeg_state_lock:
+            ffmpeg_starting.discard(name)
         return False
 
     height, width = frame.shape[:2]
@@ -486,9 +659,13 @@ def _start_ffmpeg_publisher(name: str, wait_timeout: float = 8.0) -> bool:
         ffmpeg_writer_threads[name] = thread
         thread.start()
         print(f"[FFMPEG] Started publisher for {name} -> processed_{name} (pid={proc.pid})")
+        with ffmpeg_state_lock:
+            ffmpeg_starting.discard(name)
         return True
     except Exception as e:
         print(f"[FFMPEG] Failed to start publisher for {name}: {e}")
+        with ffmpeg_state_lock:
+            ffmpeg_starting.discard(name)
         return False
 
 def _start_raw_ffmpeg_publisher(name: str, wait_timeout: float = 10.0) -> bool:
@@ -650,7 +827,10 @@ def _start_ffmpeg_publisher_async(name: str):
             time.sleep(1.0)
     threading.Thread(target=_run, daemon=True).start()
 
-def _stop_ffmpeg_publisher(name: str):
+def _stop_ffmpeg_publisher(name: str, clear_starting: bool = True):
+    if clear_starting:
+        with ffmpeg_state_lock:
+            ffmpeg_starting.discard(name)
     ffmpeg_next_start.pop(name, None)
     ffmpeg_frame_sequences.pop(name, None)
     stop_event = ffmpeg_stop_events.pop(name, None)
@@ -718,15 +898,32 @@ _ffmpeg_monitor_sources: set = set()
 _ffmpeg_monitor_thread: threading.Thread = None
 _ffmpeg_monitor_stop = threading.Event()
 
+def _is_source_name_active(name: str) -> bool:
+    cfg = load_rtsp_config()
+    links = cfg.get("rtsp_links", [])
+    with source_lock:
+        for idx in running_sources.keys():
+            if 1 <= idx <= len(links) and source_display_name(links[idx - 1]) == name:
+                return True
+    with upload_sources_lock:
+        if name in upload_sources:
+            return True
+    return False
+
 def _ffmpeg_monitor_worker():
     while not _ffmpeg_monitor_stop.is_set():
         try:
             for name in list(_ffmpeg_monitor_sources):
-                proc = ffmpeg_publishers.get(name)
+                with ffmpeg_state_lock:
+                    proc = ffmpeg_publishers.get(name)
                 now = time.time()
                 next_at = ffmpeg_next_start.get(name, 0)
 
                 if proc is None:
+                    if not _is_source_name_active(name):
+                        _ffmpeg_monitor_sources.discard(name)
+                        ffmpeg_next_start.pop(name, None)
+                        continue
                     if now >= next_at:
                         ok = _start_ffmpeg_publisher(name)
                         if not ok:
@@ -737,16 +934,7 @@ def _ffmpeg_monitor_worker():
 
                 poll = proc.poll()
                 if poll is not None:
-                    with source_lock:
-                        source_active = any(
-                            source_display_name(load_rtsp_config().get("rtsp_links", [])[idx - 1]) == name
-                            for idx in running_sources.keys()
-                            if idx <= len(load_rtsp_config().get("rtsp_links", []))
-                        )
-
-                    with upload_sources_lock:
-                        if name in upload_sources:
-                            source_active = True
+                    source_active = _is_source_name_active(name)
 
                     if source_active:
                         print(f"[FFMPEG] Publisher for {name} exited (code={poll}), restarting...")
@@ -829,6 +1017,74 @@ def _resolve_source_mode(name: str, source_metrics: Optional[dict] = None) -> Op
             return metric_mode
     return active_mode
 
+
+def _to_json_safe(value):
+    """Convert nested metric values to JSON-safe builtins."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return 0.0
+        return value
+    if isinstance(value, dict):
+        return {str(k): _to_json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_to_json_safe(v) for v in value]
+    # numpy / torch scalars
+    try:
+        if hasattr(value, "item"):
+            return _to_json_safe(value.item())
+    except Exception:
+        pass
+    return str(value)
+
+
+def _default_metrics_for_mode(mode: Optional[str]) -> Dict[str, object]:
+    base = {
+        "fps": 0.0,
+        "detection_count": 0,
+        "current_detection_count": 0,
+    }
+    if mode == "vehicle":
+        base.update({
+            "class_counts": {},
+            "state_counts": {"moving": 0, "stopped": 0, "abnormal": 0},
+            "behavior_counts": {"stable": 0, "start_stop": 0, "erratic": 0},
+            "type_influence": {},
+            "attention_list": [],
+            "high_impact_vehicles": [],
+            "dwell_stats": {"avg_dwell": 0.0, "max_dwell": 0.0, "over_threshold": 0, "longest_vehicles": []},
+        })
+    elif mode in ("flow", "congestion"):
+        base.update({
+            "congestion_index": 0,
+            "traffic_density": 0,
+            "mobility_index": 0,
+            "stalled_pct": 0,
+            "slow_pct": 0,
+            "medium_pct": 0,
+            "fast_pct": 0,
+            "class_counts": {},
+            "hot_regions": {"active_count": 0, "severity_counts": {"HIGH": 0, "MODERATE": 0, "LOW": 0}, "regions": []},
+        })
+    elif mode == "crowd":
+        base.update({
+            "crowd_count": 0,
+            "crowd_density": 0,
+            "avg_density": 0,
+            "peak_density": 0,
+            "peak_count": 0,
+            "risk_score": 0,
+            "density_class": "sparse",
+            "operational_status": "MONITOR",
+            "zones": [],
+            "zone_distribution": {"sparse": 0, "gathering": 0, "dense": 0, "critical": 0},
+            "hotspots": [],
+            "flow_summary": {"total_inflow": 0, "total_outflow": 0, "net_flow": 0},
+            "anomalies": [],
+        })
+    return base
+
 def update_metrics(stream: str, data: dict):
     # Handle critical workflow signals first
     if data.get("__started__"):
@@ -866,9 +1122,15 @@ def update_metrics(stream: str, data: dict):
                 info["started_at"] = time.time()
 
     with metrics_lock:
-        if stream_mode and "mode" not in data:
-            data = {**data, "mode": stream_mode}
-        metrics[stream] = data
+        payload = _to_json_safe(data or {})
+        if not isinstance(payload, dict):
+            payload = {}
+        if stream_mode and "mode" not in payload:
+            payload["mode"] = stream_mode
+        mode_for_defaults = payload.get("mode") or stream_mode
+        defaults = _default_metrics_for_mode(mode_for_defaults)
+        defaults.update(payload)
+        metrics[stream] = defaults
 
 def update_frame(stream: str, frame: np.ndarray):
     if frame is None or not isinstance(frame, np.ndarray):
@@ -921,7 +1183,7 @@ def update_raw_frame(stream: str, frame: np.ndarray):
 def get_all_metrics():
     with metrics_lock:
         raw_m = metrics.copy()
-    m = dict(raw_m)
+    m = {k: _to_json_safe(v) for k, v in dict(raw_m).items()}
 
     # Merge RTSP start times
     with source_lock:
@@ -942,6 +1204,17 @@ def get_all_metrics():
             dur = info.get("duration", 0.0)
             if dur > 0:
                 m[name]["total_duration"] = dur
+
+    # Ensure each active source has a complete metrics schema for the UI.
+    for name, data in list(m.items()):
+        if not isinstance(data, dict):
+            data = {}
+        mode = _resolve_source_mode(name, data)
+        defaults = _default_metrics_for_mode(mode)
+        defaults.update(data)
+        if mode and "mode" not in defaults:
+            defaults["mode"] = mode
+        m[name] = defaults
 
     return m
 
@@ -1135,11 +1408,64 @@ def _stop_all_sources():
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
+    allow_origin_regex=r"^https://([a-zA-Z0-9-]+\.)*magicboxhub\.net$",
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
+@app.middleware("http")
+async def auth_guard(request: Request, call_next):
+    path = request.url.path
+    method = request.method.upper()
+
+    # Skip non-API paths and CORS preflight.
+    if not path.startswith("/api/") or method == "OPTIONS":
+        return await call_next(request)
+
+    # Public API paths.
+    if path in AUTH_PUBLIC_PATHS:
+        return await call_next(request)
+
+    cors_headers = _cors_headers_for_request(request)
+
+    token = _extract_bearer_token(request)
+    if not token:
+        return JSONResponse(status_code=401, content={"detail": "Unauthorized"}, headers=cors_headers)
+
+    client_ip = _client_ip_from_request(request)
+    client_tab = request.headers.get("x-client-tab", "").strip() or request.query_params.get("x_client_tab", "").strip()
+    if not client_tab:
+        return JSONResponse(status_code=401, content={"detail": "Unauthorized"}, headers=cors_headers)
+
+    with auth_lock:
+        _purge_stale_auth()
+        sess = auth_sessions.get(token)
+        if not sess:
+            db_sess = get_session(token)
+            if db_sess:
+                sess = db_sess
+                auth_sessions[token] = dict(sess)
+                auth_user_token[sess.get("username")] = token
+        if not sess:
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"}, headers=cors_headers)
+        if sess.get("tab_id") and sess.get("tab_id") != client_tab:
+            return JSONResponse(status_code=401, content={"detail": "Session restricted to one browser tab"}, headers=cors_headers)
+        if sess.get("ip") and sess.get("ip") != client_ip:
+            return JSONResponse(status_code=401, content={"detail": "Session IP mismatch"}, headers=cors_headers)
+        try:
+            _register_ip_or_raise(client_ip)
+        except HTTPException as e:
+            return JSONResponse(status_code=e.status_code, content={"detail": str(e.detail)}, headers=cors_headers)
+        sess["last_seen"] = time.time()
+        auth_sessions[token] = sess
+        touch_session(token, int(sess["last_seen"]))
+
+    request.state.auth_username = sess.get("username")
+    request.state.auth_ip = client_ip
+    return await call_next(request)
 
 @app.exception_handler(413)
 async def _payload_too_large_handler(request, exc):
@@ -1147,11 +1473,7 @@ async def _payload_too_large_handler(request, exc):
     return JSONResponse(
         status_code=413,
         content={"detail": "File too large. Maximum upload size is 500MB."},
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "*",
-            "Access-Control-Allow-Headers": "*",
-        },
+        headers=_cors_headers_for_request(request),
     )
 
 @app.exception_handler(Exception)
@@ -1162,19 +1484,60 @@ async def _global_exception_handler(request, exc):
     return JSONResponse(
         status_code=500,
         content={"detail": str(exc)},
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "*",
-            "Access-Control-Allow-Headers": "*",
-        },
+        headers=_cors_headers_for_request(request),
     )
 
 
 # ── Auth endpoints ──
 
 @app.post("/api/login")
-def api_login(req: LoginRequest):
-    return login_user(req.username, req.password)
+def api_login(req: LoginRequest, request: Request):
+    result = login_user(req.username, req.password)
+    if not result.get("success"):
+        raise HTTPException(status_code=401, detail=result.get("error", "Invalid credentials"))
+
+    client_ip = _client_ip_from_request(request)
+    client_tab = request.headers.get("x-client-tab", "").strip()
+    if not client_tab:
+        raise HTTPException(status_code=401, detail="Missing client tab identifier")
+
+    token = uuid.uuid4().hex
+    now = time.time()
+    with auth_lock:
+        _register_ip_or_raise(client_ip)
+        old = auth_user_token.get(req.username)
+        if old:
+            auth_sessions.pop(old, None)
+            delete_session(old)
+        auth_user_token[req.username] = token
+        auth_sessions[token] = {
+            "username": req.username,
+            "ip": client_ip,
+            "tab_id": client_tab,
+            "created_at": now,
+            "last_seen": now,
+        }
+        create_session(token, req.username, client_ip, client_tab, int(now))
+
+    return {"success": True, "username": req.username, "token": token}
+
+@app.post("/api/logout")
+def api_logout(request: Request):
+    token = _extract_bearer_token(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    with auth_lock:
+        sess = auth_sessions.pop(token, None)
+        if not sess:
+            db_sess = get_session(token)
+            if not db_sess:
+                raise HTTPException(status_code=401, detail="Unauthorized")
+            sess = db_sess
+        uname = sess.get("username")
+        if uname and auth_user_token.get(uname) == token:
+            auth_user_token.pop(uname, None)
+        delete_session(token)
+    return {"success": True}
 
 @app.get("/api/users")
 def api_list_users():
@@ -1375,8 +1738,9 @@ def start_source(req: SourceStartRequest):
     global active_mode
 
     cfg = load_rtsp_config()
-    if req.index < 1 or req.index > len(cfg["rtsp_links"]):
-        raise HTTPException(400)
+    rtsp_links = cfg.get("rtsp_links", [])
+    if req.index < 1 or req.index > len(rtsp_links):
+        raise HTTPException(400, "Invalid source index or empty rtsp_links config")
 
     source_mode = req.mode or active_mode
     if req.mode and active_mode and req.mode != active_mode:
@@ -1384,7 +1748,7 @@ def start_source(req: SourceStartRequest):
     if req.mode and not active_mode:
         active_mode = req.mode
 
-    url = cfg["rtsp_links"][req.index - 1]
+    url = rtsp_links[req.index - 1]
     name = source_display_name(url)
 
     base_overlay = MODE_OVERLAYS.get(
@@ -1849,11 +2213,13 @@ def _stop_upload_by_name(name: str, delete_file: bool = False):
 @app.post("/api/upload")
 async def upload_video(file: UploadFile = File(...), mode: Optional[str] = Form(None)):
     filename = file.filename or ""
-    filename_lc = filename.lower()
-    if not filename_lc.endswith((".mp4", ".mkv", ".avi", ".mov")):
-        # Allow common video MIME types even if filename casing/extension is odd
+    ext = Path(filename).suffix.lower()
+    allowed_exts = {".mp4", ".mkv", ".avi", ".mov"}
+    if ext not in allowed_exts:
+        # Fallback on MIME for cases with odd/missing extension.
         content_type = (file.content_type or "").lower()
-        if not content_type.startswith("video/"):
+        allowed_mimes = {"video/mp4", "video/x-matroska", "video/quicktime", "video/x-msvideo"}
+        if content_type not in allowed_mimes and not content_type.startswith("video/"):
             raise HTTPException(400, "Unsupported file format. Use MP4, MKV, AVI, or MOV.")
 
     global active_mode

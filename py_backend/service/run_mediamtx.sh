@@ -17,4 +17,13 @@ else
   MEDIAMTX_BIN="/usr/local/bin/mediamtx"
 fi
 
+if [[ ! -x "$MEDIAMTX_BIN" ]]; then
+  echo "[IRIS] MediaMTX binary not found or not executable: $MEDIAMTX_BIN" >&2
+  exit 1
+fi
+if [[ ! -f "$PROJECT_DIR/config/mediamtx.yml" ]]; then
+  echo "[IRIS] Missing MediaMTX config: $PROJECT_DIR/config/mediamtx.yml" >&2
+  exit 1
+fi
+
 exec "$MEDIAMTX_BIN" "$PROJECT_DIR/config/mediamtx.yml" >> "$MEDIAMTX_LOG" 2>&1

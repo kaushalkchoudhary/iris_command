@@ -6,6 +6,7 @@ plus zone analysis, trend, risk, anomalies, hotspots, compression, and flow.
 """
 
 import time
+import os
 from collections import deque
 
 import torch
@@ -178,11 +179,24 @@ class CrowdCounter:
         self.model.eval()
 
         self.max_density_ema = None
+        self.prev_gray = None
+
+        # Tunables (inspired by UAV density-map cleanup workflows).
+        self.target_size = int(os.getenv("IRIS_CROWD_TARGET_SIZE", "1024"))
+        self.noise_floor_pct = float(os.getenv("IRIS_CROWD_NOISE_FLOOR_PCT", "70"))
+        self.hotspot_hi_pct = float(os.getenv("IRIS_CROWD_HOTSPOT_HI_PCT", "99.5"))
+        self.green_suppress = float(os.getenv("IRIS_CROWD_GREEN_SUPPRESS", "0.55"))
+        self.motion_suppress = float(os.getenv("IRIS_CROWD_MOTION_SUPPRESS", "0.35"))
+        self.min_component_ratio = float(os.getenv("IRIS_CROWD_MIN_COMPONENT_RATIO", "0.00008"))
+        # Legacy crowdanalysis profile used a 1.8x calibration multiplier for reported count.
+        self.count_multiplier = float(os.getenv("IRIS_CROWD_COUNT_MULTIPLIER", "1.8"))
 
         print(f"[CCN] Crowd counting model loaded on {device}")
 
-    def preprocess(self, frame: np.ndarray, target_size: int = 1024) -> torch.Tensor:
+    def preprocess(self, frame: np.ndarray, target_size: int | None = None) -> torch.Tensor:
         """Preprocess frame for inference."""
+        if target_size is None:
+            target_size = self.target_size
         h, w = frame.shape[:2]
         scale = target_size / max(h, w)
         new_h, new_w = int(h * scale), int(w * scale)
@@ -206,35 +220,119 @@ class CrowdCounter:
         img = torch.from_numpy(img.transpose(2, 0, 1)).unsqueeze(0).float()
         return img.to(self.device), (h, w), (new_h, new_w)
 
+    def _suppress_green_regions(self, frame: np.ndarray, density_map: np.ndarray) -> np.ndarray:
+        """Reduce vegetation false positives (trees/grass) using HSV green mask."""
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        # Broad green range for drone scenes.
+        green_mask = cv2.inRange(hsv, (30, 30, 20), (95, 255, 255)).astype(np.float32) / 255.0
+        if self.green_suppress <= 0:
+            return density_map
+        keep = 1.0 - np.clip(self.green_suppress, 0.0, 0.95) * green_mask
+        return density_map * keep
+
+    def _suppress_static_noise(self, frame: np.ndarray, density_map: np.ndarray) -> np.ndarray:
+        """
+        Reduce persistent/static artifacts.
+        Motion is used as a soft prior, not a hard gate (crowds can stand still).
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        if self.prev_gray is None:
+            self.prev_gray = gray
+            return density_map
+
+        diff = cv2.absdiff(gray, self.prev_gray)
+        self.prev_gray = gray
+
+        _, motion = cv2.threshold(diff, 12, 1.0, cv2.THRESH_BINARY)
+        motion = cv2.dilate(motion.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1).astype(np.float32)
+
+        # Keep most dynamic response; retain baseline on static zones.
+        static_floor = np.clip(self.motion_suppress, 0.0, 0.9)
+        keep = static_floor + (1.0 - static_floor) * motion
+        return density_map * keep
+
+    def _remove_small_components(self, density_map: np.ndarray) -> np.ndarray:
+        """Remove tiny isolated blobs that often come from textured background."""
+        peak = float(density_map.max())
+        if peak <= 1e-8:
+            return density_map
+
+        active = (density_map >= peak * 0.08).astype(np.uint8)
+        nlabels, labels, stats, _ = cv2.connectedComponentsWithStats(active, connectivity=8)
+        if nlabels <= 1:
+            return density_map
+
+        min_area = max(8, int(self.min_component_ratio * density_map.shape[0] * density_map.shape[1]))
+        keep = np.zeros_like(active)
+        for i in range(1, nlabels):
+            if stats[i, cv2.CC_STAT_AREA] >= min_area:
+                keep[labels == i] = 1
+        return density_map * keep.astype(np.float32)
+
+    def _build_heatmap(self, density_map: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Build hotspot-only heatmap:
+        - no random background dots
+        - blue-to-red palette on active regions
+        - explicit alpha map for clean compositing
+        """
+        d = np.maximum(density_map, 0).astype(np.float32)
+        positive = d[d > 0]
+        if positive.size < 4:
+            h, w = d.shape[:2]
+            return np.zeros((h, w, 3), dtype=np.uint8), np.zeros((h, w), dtype=np.float32)
+
+        hi = float(np.percentile(positive, self.hotspot_hi_pct))
+        lo = float(np.percentile(positive, min(self.noise_floor_pct + 10, self.hotspot_hi_pct - 1)))
+        if hi <= lo + 1e-8:
+            hi = lo + 1e-8
+
+        norm = np.clip((d - lo) / (hi - lo), 0.0, 1.0)
+        norm = np.power(norm, 0.80)  # Slightly boost strong hotspots.
+
+        color = cv2.applyColorMap((norm * 255).astype(np.uint8), cv2.COLORMAP_TURBO)
+        alpha = np.clip((norm - 0.05) / 0.95, 0.0, 1.0).astype(np.float32)
+
+        # Make inactive zones truly dark to avoid "full blue wash".
+        color = (color.astype(np.float32) * alpha[..., None]).astype(np.uint8)
+        return color, alpha
+
     @torch.no_grad()
     def count(self, frame: np.ndarray) -> dict:
         """Count people in frame with real-time heatmap generation."""
         img_tensor, orig_size, proc_size = self.preprocess(frame)
 
         density = self.model(img_tensor)
-        count = density.sum().item()
 
         density_np = density.squeeze().cpu().numpy()
         density_resized = cv2.resize(density_np, (orig_size[1], orig_size[0]), interpolation=cv2.INTER_CUBIC)
+        density_resized = np.maximum(density_resized, 0).astype(np.float32)
+        density_resized = cv2.GaussianBlur(density_resized, (0, 0), 1.2)
 
-        # Thresholding to remove noise (trees, background)
-        density_resized[density_resized < 1e-4] = 0
-
-        # Use proven normalization from crowdanalysis: normalize by min/max on raw density map
-        density_resized = np.maximum(density_resized, 0)
-        dmin = float(density_resized.min())
-        dmax = float(density_resized.max())
-        if dmax > dmin:
-            density_norm = (density_resized - dmin) / (dmax - dmin)
+        # Adaptive floor removal.
+        positive = density_resized[density_resized > 0]
+        if positive.size > 8:
+            floor = float(np.percentile(positive, self.noise_floor_pct))
+            density_resized = np.maximum(0.0, density_resized - floor)
         else:
-            density_norm = np.zeros_like(density_resized, dtype=np.float32)
+            density_resized[density_resized < 1e-4] = 0.0
 
-        heatmap = cv2.applyColorMap((density_norm * 255).astype(np.uint8), cv2.COLORMAP_JET)
+        # UAV-specific cleanup: vegetation and static-texture suppression.
+        density_resized = self._suppress_green_regions(frame, density_resized)
+        density_resized = self._suppress_static_noise(frame, density_resized)
+        density_resized = self._remove_small_components(density_resized)
+
+        count = float(np.maximum(density_resized, 0).sum())
+        count *= max(0.1, self.count_multiplier)
+        heatmap, heat_alpha = self._build_heatmap(density_resized)
 
         return {
             'count': int(round(count)),
             'density_map': density_resized,
             'heatmap': heatmap,
+            'heat_alpha': heat_alpha,
         }
 
 

@@ -7,8 +7,9 @@ import RightPanel from './components/Dashboard/RightPanel';
 import Footer from './components/Dashboard/Footer';
 import IRISLoader from './components/Dashboard/IRISLoader';
 import WelcomeScreen from './components/Dashboard/WelcomeScreen';
+import HLSVideo from './components/UI/HLSVideo';
 import Login from './Login';
-import { API_BASE_URL, WEBRTC_BASE } from './config';
+import { API_BASE_URL, WEBRTC_BASE, HLS_BASE } from './config';
 
 // ── MODE CONFIGURATION ──
 // Overlays are hardcoded in the backend per mode. Frontend only knows theme.
@@ -437,7 +438,9 @@ const useWebRTC = (streamName, enabled = true, options = {}) => {
 const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics }) => {
   const [isCellLoading, setIsCellLoading] = useState(true);
   const [rawPlaying, setRawPlaying] = useState(false);
+  const [rawHlsPlaying, setRawHlsPlaying] = useState(false);
   const [processedPlaying, setProcessedPlaying] = useState(false);
+  const [processedHlsPlaying, setProcessedHlsPlaying] = useState(false);
   const [samResult, setSamResult] = useState(null);
   const [reportLoading, setReportLoading] = useState(false);
 
@@ -476,12 +479,34 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
 
   // Phase 1: instant raw RTSP via WebRTC (RTSP only).
   const { videoRef: rawVideoRef, connected: rawConnected } = useWebRTC(video.id, !isUpload && !isFinished);
-  const rawMjpegUrl = `${API_BASE_URL}/raw/${video.id}`;
+  const rawMjpegUrl = useMemo(() => {
+    const token = sessionStorage.getItem('iris_auth_token') || localStorage.getItem('iris_auth_token') || '';
+    const tabId = sessionStorage.getItem('iris_tab_id') || '';
+    const params = new URLSearchParams();
+    if (token) params.set('auth_token', token);
+    if (tabId) params.set('x_client_tab', tabId);
+    const qs = params.toString();
+    return `${API_BASE_URL}/raw/${video.id}${qs ? `?${qs}` : ''}`;
+  }, [video.id]);
+  const mergedMjpegUrl = useMemo(() => {
+    const token = sessionStorage.getItem('iris_auth_token') || localStorage.getItem('iris_auth_token') || '';
+    const tabId = sessionStorage.getItem('iris_tab_id') || '';
+    const params = new URLSearchParams();
+    if (token) params.set('auth_token', token);
+    if (tabId) params.set('x_client_tab', tabId);
+    const qs = params.toString();
+    return `${API_BASE_URL}/stream/${video.id}${qs ? `?${qs}` : ''}`;
+  }, [video.id]);
 
   // Phase 2: processed feed via WebRTC (libx264 baseline → RTSP → MediaMTX → WebRTC)
   const processedStreamName = `processed_${video.id}`;
   const isForensics = useCase === 'forensics';
   const isCongestion = useCase === 'congestion';
+  const isCrowd = useCase === 'crowd';
+  const useHlsForLive = (isCongestion || isCrowd) && !isUpload && !isForensics;
+  const useRawHls = useHlsForLive;
+  const rawHlsUrl = `${HLS_BASE}/${video.id}/index.m3u8`;
+  const processedHlsUrl = `${HLS_BASE}/processed_${video.id}/index.m3u8`;
   const { videoRef: processedVideoRef, connected: processedConnected } = useWebRTC(
     processedStreamName,
     (isUpload || !isForensics) && !isFinished,
@@ -497,7 +522,9 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
   // Prevent stale play-state from hiding all layers after mode/source switches.
   useEffect(() => {
     setRawPlaying(false);
+    setRawHlsPlaying(false);
     setProcessedPlaying(false);
+    setProcessedHlsPlaying(false);
     setHadAnyFrame(false);
     setIsCellLoading(true);
   }, [video.id, useCase, isUpload]);
@@ -505,11 +532,13 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
   // Hide loader once video is rendering — brief delay to show "FEED LOCKED" state
   useEffect(() => {
     if (isFinished) return;
-    const isReady = isUpload ? (rawPlaying || processedPlaying) : rawPlaying;
+    const isReady = isUpload
+      ? (rawPlaying || processedPlaying || processedHlsPlaying)
+      : (useRawHls ? (rawHlsPlaying || processedHlsPlaying || rawPlaying || processedPlaying) : rawPlaying);
     if (!isReady) return;
     const timer = setTimeout(() => setIsCellLoading(false), 600);
     return () => clearTimeout(timer);
-  }, [rawPlaying, processedPlaying, isUpload, isFinished]);
+  }, [rawPlaying, rawHlsPlaying, processedPlaying, processedHlsPlaying, isUpload, isFinished, useRawHls]);
 
   // Poll forensics result when in forensics mode
   useEffect(() => {
@@ -543,18 +572,20 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
   // If finished, we might not have a playing video, but we want to show the last frame if possible.
   // Since we don't have the last frame stored in frontend, we might see black or frozen last frame.
   // Ideally, valid cleanup on backend keeps the stream available or we just accept the "finished" UI state.
-  const showProcessed = (processedPlaying || isFinished) && (isUpload || !isForensics) && !showForensicsResult;
-  const showRawMjpeg = isUpload
-    ? (!showForensicsResult && !processedPlaying)
-    : !rawPlaying;
+  const showProcessed = (processedHlsPlaying || processedPlaying || isFinished) && (isUpload || !isForensics) && !showForensicsResult;
+  const showRawHls = useRawHls && !showProcessed && !showForensicsResult && !rawPlaying;
+  const showRawMjpeg = !showProcessed && !showForensicsResult && (
+    isUpload || (!rawPlaying && !rawHlsPlaying)
+  );
+  const showRawWebRTC = !isUpload && !showProcessed && !showForensicsResult;
 
   return (
     <div className={`relative overflow-hidden group ${getVideoClass(index, total)}`}>
       <AnimatePresence>
         {isCellLoading && !isFinished && (
           <IRISLoader
-            connected={isUpload ? (rawPlaying || processedConnected) : rawConnected}
-            ready={isUpload ? (rawPlaying || processedPlaying) : rawPlaying}
+            connected={isUpload ? (rawPlaying || processedConnected || processedHlsPlaying) : (useRawHls ? (rawHlsPlaying || processedHlsPlaying || processedConnected) : rawConnected)}
+            ready={isUpload ? (rawPlaying || processedPlaying || processedHlsPlaying) : (useRawHls ? (rawHlsPlaying || processedHlsPlaying || rawPlaying || processedPlaying) : rawPlaying)}
           />
         )}
       </AnimatePresence>
@@ -592,6 +623,33 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
         />
       )}
 
+      {/* Layer 0b: Congestion route raw HLS until processed feed is ready */}
+      {showRawHls && (
+        <HLSVideo
+          src={rawHlsUrl}
+          fallbackSrc={mergedMjpegUrl}
+          onPlaying={() => { setRawHlsPlaying(true); setHadAnyFrame(true); }}
+          className="absolute inset-0 w-full h-full object-cover"
+          style={maskStyle}
+        />
+      )}
+
+      {/* Layer 1b: crowd/congestion processed HLS */}
+      {useHlsForLive && (
+        <HLSVideo
+          src={processedHlsUrl}
+          fallbackSrc={mergedMjpegUrl}
+          onPlaying={() => { setProcessedHlsPlaying(true); setHadAnyFrame(true); }}
+          className="absolute inset-0 w-full h-full object-cover"
+          style={{
+            ...maskStyle,
+            opacity: showProcessed ? 1 : 0,
+            transition: 'opacity 0.5s ease',
+            filter: isFinished ? 'grayscale(0.5) brightness(0.8)' : 'none',
+          }}
+        />
+      )}
+
       {/* Layer 1: WebRTC raw RTSP — instant, always underneath (hidden for uploads) */}
       {!isUpload && (
         <video
@@ -603,13 +661,13 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
           className="absolute inset-0 w-full h-full object-cover"
           style={{
             ...maskStyle,
-            opacity: isCellLoading ? 0 : (showProcessed || showForensicsResult) ? 0 : 1,
-            transition: isCellLoading ? 'none' : 'opacity 0.5s ease',
+            opacity: showRawWebRTC ? 1 : 0,
+            transition: 'opacity 0.5s ease',
           }}
         />
       )}
 
-      {/* Layer 2: WebRTC processed stream */}
+      {/* Layer 2: WebRTC processed stream (kept as fallback in all non-forensics modes) */}
       {(isUpload || !isForensics) && (
         <video
           ref={processedVideoRef}
@@ -762,6 +820,10 @@ const Dashboard = ({ onLogout }) => {
   const [allVideos, setAllVideos] = useState(filteredDrones);
   const [selectedVideos, setSelectedVideos] = useState([]);
   const [allMetrics, setAllMetrics] = useState({});
+  const effectiveSelectedVideos = useMemo(
+    () => selectedVideos.filter((v) => v.type === 'upload' || filteredDrones.some((d) => d.id === v.id)),
+    [selectedVideos, filteredDrones]
+  );
 
   // Sync allVideos when useCase changes (different drones for different modes)
   useEffect(() => {
@@ -777,7 +839,7 @@ const Dashboard = ({ onLogout }) => {
 
   // Poll metrics from backend every 1.5s
   useEffect(() => {
-    if (selectedVideos.length === 0) return;
+    if (effectiveSelectedVideos.length === 0) return;
     let cancelled = false;
     const poll = async () => {
       try {
@@ -791,14 +853,14 @@ const Dashboard = ({ onLogout }) => {
     poll();
     const interval = setInterval(poll, 1500);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [selectedVideos]);
+  }, [effectiveSelectedVideos]);
 
   // Stream lifecycle: start selected videos — backend handles overlays per mode
   useEffect(() => {
     let cancelled = false;
 
     const startStreams = async () => {
-      for (const v of selectedVideos) {
+      for (const v of effectiveSelectedVideos) {
         if (cancelled || v.type === 'upload') continue;  // uploads already processing via /api/upload
         await startDroneProcessing(v.droneIndex, useCase);
       }
@@ -809,7 +871,7 @@ const Dashboard = ({ onLogout }) => {
     return () => {
       cancelled = true;
     };
-  }, [selectedVideos, useCase]);
+  }, [effectiveSelectedVideos, useCase]);
 
   // Stop processing immediately when a source is deselected (including uploads)
   const prevSelectedRef = useRef([]);
@@ -932,13 +994,13 @@ const Dashboard = ({ onLogout }) => {
           ></div>
 
           <div className="absolute inset-0 z-0 flex items-center justify-center">
-            <div className={`w-full h-full grid gap-2 p-4 ${getGridLayout(selectedVideos.length)}`}>
-              {selectedVideos.map((video, index) => (
+            <div className={`w-full h-full grid gap-2 p-4 ${getGridLayout(effectiveSelectedVideos.length)}`}>
+              {effectiveSelectedVideos.map((video, index) => (
                 <VideoCell
                   key={video.id}
                   video={video}
                   index={index}
-                  total={selectedVideos.length}
+                  total={effectiveSelectedVideos.length}
                   getVideoClass={getVideoClass}
                   useCase={useCase}
                   sourceMetrics={allMetrics[video.id] || null}
@@ -950,7 +1012,7 @@ const Dashboard = ({ onLogout }) => {
           <div className="absolute inset-0 z-0 bg-[radial-gradient(circle_at_center,transparent_0%,rgba(0,0,0,0.6)_100%)] pointer-events-none"></div>
         </div>
 
-        <RightPanel useCase={useCase} sources={allVideos} selectedVideos={selectedVideos} />
+        <RightPanel useCase={useCase} sources={allVideos} selectedVideos={effectiveSelectedVideos} />
       </div>
 
       <Footer selectedVideos={selectedVideos} onVideosChange={setSelectedVideos} videos={allVideos} useCase={useCase} />
@@ -960,16 +1022,23 @@ const Dashboard = ({ onLogout }) => {
 
 const AppContents = () => {
   const [isAuthenticated, setIsAuthenticated] = useState(() => {
-    return localStorage.getItem('iris_authenticated') === 'true';
+    const token = sessionStorage.getItem('iris_auth_token') || localStorage.getItem('iris_auth_token');
+    const authFlag = sessionStorage.getItem('iris_authenticated') || localStorage.getItem('iris_authenticated');
+    return Boolean(token) && authFlag === 'true';
   });
   const location = useLocation();
 
   const handleLogin = () => {
-    localStorage.setItem('iris_authenticated', 'true');
+    sessionStorage.setItem('iris_authenticated', 'true');
+    localStorage.removeItem('iris_authenticated');
     setIsAuthenticated(true);
   };
 
   const handleLogout = () => {
+    fetch(`${API_BASE_URL}/logout`, { method: 'POST' }).catch(() => {});
+    sessionStorage.removeItem('iris_auth_token');
+    sessionStorage.removeItem('iris_authenticated');
+    localStorage.removeItem('iris_auth_token');
     localStorage.removeItem('iris_authenticated');
     localStorage.removeItem('iris_username');
     setIsAuthenticated(false);

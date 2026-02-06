@@ -915,7 +915,14 @@ def process_stream(index, name, url, stop_event, f_q, m_q, a_q, rf_q, overlay_di
 
                 if overlay.get("heatmap", True):
                     heatmap = cached_ccn_result['heatmap']
-                    out = cv2.addWeighted(out, 0.6, heatmap, 0.4, 0)
+                    heat_alpha = cached_ccn_result.get('heat_alpha')
+                    if heat_alpha is not None:
+                        a = np.clip(heat_alpha, 0.0, 1.0)[..., None].astype(np.float32)
+                        out_f = out.astype(np.float32)
+                        hm_f = heatmap.astype(np.float32)
+                        out = np.clip(out_f * (1.0 - 0.55 * a) + hm_f * (0.90 * a), 0, 255).astype(np.uint8)
+                    else:
+                        out = cv2.addWeighted(out, 0.65, heatmap, 0.35, 0)
 
             else:
                 crowd_count = 0
@@ -1346,7 +1353,14 @@ def process_upload_stream(name, file_path, stop_event, f_q, m_q, a_q, rf_q, over
 
                 if overlay.get("heatmap", True):
                     heatmap = cached_ccn_result['heatmap']
-                    out = cv2.addWeighted(out, 0.6, heatmap, 0.4, 0)
+                    heat_alpha = cached_ccn_result.get('heat_alpha')
+                    if heat_alpha is not None:
+                        a = np.clip(heat_alpha, 0.0, 1.0)[..., None].astype(np.float32)
+                        out_f = out.astype(np.float32)
+                        hm_f = heatmap.astype(np.float32)
+                        out = np.clip(out_f * (1.0 - 0.55 * a) + hm_f * (0.90 * a), 0, 255).astype(np.uint8)
+                    else:
+                        out = cv2.addWeighted(out, 0.65, heatmap, 0.35, 0)
             else:
                 crowd_count = 0
                 ccn_density = np.zeros((h, w), dtype=np.float32)

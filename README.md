@@ -126,12 +126,16 @@ Common commands:
 ## Production Run (systemd)
 
 ```bash
-sudo cp py_backend/service/iris-backend.service /etc/systemd/system/
-sudo cp py_backend/service/iris-mediamtx.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable iris-mediamtx iris-backend
-sudo systemctl start iris-mediamtx
-sudo systemctl start iris-backend
+# Optional: tune runtime/GPU/session limits first.
+sudo cp py_backend/service/iris-command.env /etc/default/iris-command
+sudo nano /etc/default/iris-command
+
+# Install + enable + restart both units.
+sudo py_backend/service/install_systemd.sh
+
+# Verify.
+systemctl status iris-mediamtx.service iris-backend.service
+journalctl -u iris-mediamtx.service -u iris-backend.service -f
 ```
 
 ## API Examples

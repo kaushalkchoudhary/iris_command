@@ -10,7 +10,12 @@ rtspTransports: [tcp]
 
 hls: yes
 hlsAddress: :8888
-hlsAllowOrigins: ['*']
+hlsAllowOrigins:
+  - "*"
+  - https://drone.magicboxhub.net
+  - https://iriscmd.stagingbot.xyz
+  - http://localhost:3000
+  - http://localhost:5173
 hlsVariant: lowLatency
 hlsAlwaysRemux: yes
 hlsSegmentCount: 7
@@ -19,7 +24,12 @@ hlsPartDuration: 250ms
 
 webrtc: yes
 webrtcAddress: :8889
-webrtcAllowOrigins: ['*']
+webrtcAllowOrigins:
+  - "*"
+  - https://drone.magicboxhub.net
+  - https://iriscmd.stagingbot.xyz
+  - http://localhost:3000
+  - http://localhost:5173
 webrtcICEServers2: []
 webrtcLocalUDPAddress: :8189
 webrtcLocalTCPAddress: :8189

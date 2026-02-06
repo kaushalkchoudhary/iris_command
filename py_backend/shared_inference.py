@@ -124,7 +124,9 @@ class StreamState:
         self.crowd_analytics = None
         self.ccn_counter = None
         self.last_ccn_time = 0.0
-        self.ccn_interval = 1.0 / 5.0
+        # Legacy crowdanalysis profile processed at ~1 FPS for stable crowd estimates.
+        ccn_fps = max(0.1, float(os.environ.get("IRIS_CROWD_CCN_FPS", "1.0")))
+        self.ccn_interval = 1.0 / ccn_fps
         self.cached_ccn_result = None
         self.class_names = None
 
@@ -273,6 +275,11 @@ class SharedInferenceManager:
             state.cached_overlay["confidence"] = CROWD_CONF_THRESH
             state.crowd_analytics = CrowdAnalyticsState(w, h, src_fps)
             state.heatmap_renderer = CrowdHeatmapRenderer(accumulate_frames=8)
+            state.full_heatmap_renderer = FullHeatmapRenderer(
+                red_hotspots_only=True,
+                point_radius_scale=0.75,
+                point_strength=1.8,
+            )
             if USE_CCN_FOR_CROWD:
                 state.ccn_counter = CrowdCounter(MODEL_PATH_CROWD_CCN, "cuda" if self.device == "cuda" else "cpu")
         else:
@@ -651,8 +658,16 @@ class SharedInferenceManager:
         now = time.time()
         self._refresh_overlay(state, now)
         overlay = state.cached_overlay
+        heatmap_enabled = bool(overlay.get("heatmap", True))
+        full_heatmap_enabled = heatmap_enabled and bool(overlay.get("heatmap_full", False))
+        bboxes_enabled = bool(overlay.get("bboxes", True))
 
         out = frame.copy()
+        detections = None
+        tracked = None
+        if full_heatmap_enabled or bboxes_enabled:
+            detections = sv.Detections.from_ultralytics(result)
+            tracked = detections
 
         if USE_CCN_FOR_CROWD and state.ccn_counter:
             if now - state.last_ccn_time >= state.ccn_interval:
@@ -665,24 +680,32 @@ class SharedInferenceManager:
         if state.cached_ccn_result:
             crowd_count = state.cached_ccn_result['count']
             ccn_density = state.cached_ccn_result['density_map']
-            if overlay.get("heatmap", True):
+            if heatmap_enabled and not full_heatmap_enabled:
                 heatmap = state.cached_ccn_result['heatmap']
-                out = cv2.addWeighted(out, 0.6, heatmap, 0.4, 0)
+                heat_alpha = state.cached_ccn_result.get('heat_alpha')
+                if heat_alpha is not None:
+                    a = np.clip(heat_alpha, 0.0, 1.0)[..., None].astype(np.float32)
+                    out_f = out.astype(np.float32)
+                    hm_f = heatmap.astype(np.float32)
+                    # hotspot-weighted blend (prevents global blue wash)
+                    out = np.clip(out_f * (1.0 - 0.55 * a) + hm_f * (0.90 * a), 0, 255).astype(np.uint8)
+                else:
+                    out = cv2.addWeighted(out, 0.65, heatmap, 0.35, 0)
         else:
             crowd_count = 0
             h, w = out.shape[:2]
             ccn_density = np.zeros((h, w), dtype=np.float32)
 
-        if overlay.get("bboxes", True):
-            detections = sv.Detections.from_ultralytics(result)
-            tracked = detections
+        if full_heatmap_enabled and state.full_heatmap_renderer:
+            state.full_heatmap_renderer.update(tracked, frame.shape)
+            state.full_heatmap_renderer.render(out)
+
+        if bboxes_enabled and tracked is not None:
             for i in range(len(tracked.xyxy)):
                 x1, y1, x2, y2 = map(int, tracked.xyxy[i])
-                cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 0), 1)
+                cv2.rectangle(out, (x1, y1), (x2, y2), (40, 40, 220), 1)
             if not state.cached_ccn_result:
                 crowd_count = len(tracked.xyxy)
-        else:
-            tracked = None
 
         if state.crowd_analytics and now - state.last_metrics_time >= 0.2:
             metrics = state.crowd_analytics.update(crowd_count, ccn_density)

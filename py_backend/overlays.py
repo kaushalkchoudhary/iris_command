@@ -314,9 +314,18 @@ class HeatmapRenderer:
 
 
 class FullHeatmapRenderer:
-    """Full-frame light-blue wash with congestion hotspots."""
+    """Full-frame heatmap with optional blue-wash + red-hotspot crowd styling."""
 
-    def __init__(self, scale=0.24, decay=0.985, blur=21, update_stride=2):
+    def __init__(
+        self,
+        scale=0.24,
+        decay=0.985,
+        blur=21,
+        update_stride=2,
+        red_hotspots_only=False,
+        point_radius_scale=0.4,
+        point_strength=1.0,
+    ):
         self.scale = float(os.environ.get("IRIS_FULL_HEATMAP_SCALE", str(scale)))
         self.decay = float(os.environ.get("IRIS_FULL_HEATMAP_DECAY", str(decay)))
         self.blur = int(os.environ.get("IRIS_FULL_HEATMAP_BLUR", str(blur)))
@@ -329,6 +338,9 @@ class FullHeatmapRenderer:
         self.no_det_decay = float(os.environ.get("IRIS_FULL_HEATMAP_NO_DET_DECAY", "0.80"))
         self.no_det_clear_frames = int(os.environ.get("IRIS_FULL_HEATMAP_NO_DET_CLEAR_FRAMES", "20"))
         self.hotspot_min_activation = float(os.environ.get("IRIS_FULL_HEATMAP_MIN_ACTIVATION", "0.18"))
+        self.red_hotspots_only = bool(red_hotspots_only)
+        self.point_radius_scale = max(0.1, float(point_radius_scale))
+        self.point_strength = max(0.1, float(point_strength))
         self._no_det_frames = 0
         self._step = 0
 
@@ -366,14 +378,14 @@ class FullHeatmapRenderer:
             # CENTERED: center of bbox for better visualization
             gx = int((x1 + x2) * 0.5)
             gy = int((y1 + y2) * 0.5)
-            r = int(max(6, min(x2 - x1, y2 - y1) * 0.4))
+            r = int(max(6, min(x2 - x1, y2 - y1) * self.point_radius_scale))
 
             sx = int(gx * self.scale)
             sy = int(gy * self.scale)
             sr = max(3, int(r * self.scale))
 
             if 0 <= sx < self.accumulator.shape[1] and 0 <= sy < self.accumulator.shape[0]:
-                cv2.circle(self.accumulator, (sx, sy), sr, 1.0, -1)
+                cv2.circle(self.accumulator, (sx, sy), sr, self.point_strength, -1)
 
     def render(self, frame):
         if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
@@ -409,7 +421,13 @@ class FullHeatmapRenderer:
             # Ignore weak residual energy to avoid ghost dots when scene is empty.
             self.accumulator *= self.no_det_decay
             return
-        heatmap = cv2.applyColorMap((hotspot * 255).astype(np.uint8), self.colormap)
+        if self.red_hotspots_only:
+            heat_level = (hotspot * 255).astype(np.uint8)
+            heatmap = np.zeros((hotspot.shape[0], hotspot.shape[1], 3), dtype=np.uint8)
+            heatmap[:, :, 2] = heat_level
+            heatmap[:, :, 1] = (heat_level.astype(np.float32) * 0.12).astype(np.uint8)
+        else:
+            heatmap = cv2.applyColorMap((hotspot * 255).astype(np.uint8), self.colormap)
 
         heatmap_full = cv2.resize(heatmap, (w, h), interpolation=cv2.INTER_LINEAR)
         if heatmap_full is None:

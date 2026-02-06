@@ -151,6 +151,14 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh, useCas
 
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${API_BASE_URL}/upload`);
+    const token = sessionStorage.getItem('iris_auth_token') || localStorage.getItem('iris_auth_token');
+    const tabId = sessionStorage.getItem('iris_tab_id');
+    if (token) {
+      xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    }
+    if (tabId) {
+      xhr.setRequestHeader('X-Client-Tab', tabId);
+    }
 
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) setUploadProgress((e.loaded / e.total) * 100);
@@ -297,7 +305,7 @@ const Footer = ({ selectedVideos, onVideosChange, videos = [], onRefresh, useCas
         <div className="relative shrink-0">
           <input
             type="file"
-            accept=".mp4,.mkv,.avi,.mov"
+            accept=".mp4,.MP4,.mkv,.MKV,.avi,.AVI,.mov,.MOV,video/mp4,video/x-matroska"
             className="absolute inset-0 opacity-0 cursor-pointer z-10"
             onChange={(e) => uploadFile(e.target.files[0])}
             disabled={isUploading}

@@ -15,34 +15,44 @@
 
 [Unit]
 Description=IRIS Command Video Analytics Backend
-Wants=network-online.target iris-mediamtx.service
+Requires=iris-mediamtx.service
+Wants=network-online.target
 After=network-online.target iris-mediamtx.service
+PartOf=iris-mediamtx.service
+StartLimitIntervalSec=60
+StartLimitBurst=6
 
 [Service]
 Type=simple
 User=ubuntu
 Group=ubuntu
+SupplementaryGroups=video render
 WorkingDirectory=/home/ubuntu/Desktop/iris_command/py_backend
 
 # Critical: Unbuffered Python output for streaming to work
 Environment=PYTHONUNBUFFERED=1
 Environment=OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp|buffer_size;262144|analyzeduration;50000|probesize;50000|fflags;nobuffer|flags;low_delay
+EnvironmentFile=-/etc/default/iris-command
+ExecStartPre=/usr/bin/test -x /home/ubuntu/Desktop/iris_command/py_backend/.venv/bin/python
+ExecStartPre=/usr/bin/test -f /home/ubuntu/Desktop/iris_command/py_backend/app.py
 
 # Use the wrapper to ensure timestamped logs in /home/ubuntu/Desktop/iris_command/logs/YYYY-MM-DD/
 ExecStart=/home/ubuntu/Desktop/iris_command/py_backend/service/run_backend.sh
 
 # Restart policy
 Restart=always
-RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=6
+RestartSec=3
+TimeoutStopSec=45
+KillSignal=SIGINT
+KillMode=mixed
 
 # Logging
-StandardOutput=null
-StandardError=null
+StandardOutput=journal
+StandardError=journal
 
 # Resource limits
 LimitNOFILE=65535
+TasksMax=infinity
 
 [Install]
 WantedBy=multi-user.target
