@@ -8,6 +8,7 @@
 #   ./start_backend.sh restart   # Restart all services
 #   ./start_backend.sh status    # Show service status
 #   ./start_backend.sh logs      # Show recent logs
+#   ./start_backend.sh tail      # Follow backend logs in real-time
 #
 # This script handles:
 # - Running Python with unbuffered output (critical for nohup/background)
@@ -152,6 +153,19 @@ stop_services() {
     kill_pids_gracefully "FFmpeg publishers" "${ffmpeg_list[@]}"
     kill_pids_gracefully "backend" "${backend_list[@]}"
     kill_pids_gracefully "MediaMTX" "${mediamtx_list[@]}"
+
+    # Kill any remaining child processes (multiprocessing workers)
+    for pid in "${backend_list[@]}"; do
+        pkill -P "$pid" 2>/dev/null || true
+    done
+
+    # Final cleanup: kill any remaining Python processes in this directory
+    sleep 1
+    mapfile -t remaining_backend < <(backend_pids)
+    if [ "${#remaining_backend[@]}" -gt 0 ]; then
+        warn "Force killing remaining backend processes: ${remaining_backend[*]}"
+        kill -9 "${remaining_backend[@]}" 2>/dev/null || true
+    fi
 
     rm -f "$MEDIAMTX_PID_FILE" "$BACKEND_PID_FILE"
     cleanup_leftovers
@@ -311,8 +325,20 @@ case "$1" in
             echo "No mediamtx log found"
         fi
         ;;
+    tail)
+        LATEST_BACKEND_LOG="$(latest_log_path 'backend-*.log')"
+        if [ -n "$LATEST_BACKEND_LOG" ] && [ -f "$LATEST_BACKEND_LOG" ]; then
+            log "Following backend log: $LATEST_BACKEND_LOG"
+            log "Press Ctrl+C to stop"
+            echo ""
+            tail -f "$LATEST_BACKEND_LOG"
+        else
+            error "No backend log found"
+            exit 1
+        fi
+        ;;
     *)
-        echo "Usage: $0 {start|stop|restart|status|logs}"
+        echo "Usage: $0 {start|stop|restart|status|logs|tail}"
         exit 1
         ;;
 esac

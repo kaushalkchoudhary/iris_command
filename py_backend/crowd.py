@@ -217,6 +217,9 @@ class CrowdCounter:
         density_np = density.squeeze().cpu().numpy()
         density_resized = cv2.resize(density_np, (orig_size[1], orig_size[0]), interpolation=cv2.INTER_CUBIC)
 
+        # Thresholding to remove noise (trees, background)
+        density_resized[density_resized < 1e-4] = 0
+
         # Use proven normalization from crowdanalysis: normalize by min/max on raw density map
         density_resized = np.maximum(density_resized, 0)
         dmin = float(density_resized.min())

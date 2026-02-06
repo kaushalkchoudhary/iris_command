@@ -301,10 +301,15 @@ class SharedInferenceManager:
                         continue
                     if not state.has_any_frame and (time.time() - state.decode_start) >= 10.0:
                         print(f"[UPLOAD] {state.name}: GPU decode stalled >10s, no frames received")
-                    # After frames have started, treat sustained failures as EOF
-                    if state.has_any_frame and state.decode_failures < 30:
+                    # Loop the video for uploads
+                    if state.has_any_frame:
+                        # Reset to beginning
+                        state.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        state.decode_failures = 0
+                        # Small pause to prevent CPU spin if seek fails repeatedly
                         time.sleep(0.01)
                         continue
+
                     if not state.finished:
                         state.finished = True
                         try:

@@ -718,10 +718,10 @@ const VideoCell = ({ video, index, total, getVideoClass, useCase, sourceMetrics 
             onClick={handleGenerateReport}
             disabled={reportLoading || !canDownload}
             className={`absolute bottom-[25px] right-5 z-30 flex items-center gap-1.5 px-2.5 py-1 backdrop-blur-md shadow-[0_0_10px_rgba(6,182,212,0.12)] transition-all group/report ${canDownload
-                ? (isFinished
-                  ? 'bg-emerald-900/80 border border-emerald-400/50 hover:bg-emerald-800 hover:border-emerald-300 cursor-pointer'
-                  : 'bg-black/70 border border-cyan-400/30 hover:border-cyan-400/60 hover:bg-black/80 cursor-pointer')
-                : 'bg-black/50 border border-white/10 opacity-70 cursor-not-allowed'
+              ? (isFinished
+                ? 'bg-emerald-900/80 border border-emerald-400/50 hover:bg-emerald-800 hover:border-emerald-300 cursor-pointer'
+                : 'bg-black/70 border border-cyan-400/30 hover:border-cyan-400/60 hover:bg-black/80 cursor-pointer')
+              : 'bg-black/50 border border-white/10 opacity-70 cursor-not-allowed'
               }`}
             title={canDownload ? "Generate incident report" : "Report available after analysis"}
           >
@@ -847,7 +847,7 @@ const Dashboard = ({ onLogout }) => {
 
     removed.forEach((v) => {
       if (v.type === 'upload') {
-        fetch(`${API_BASE_URL}/uploads/${v.id}/stop`, { method: 'POST' }).catch(() => {});
+        fetch(`${API_BASE_URL}/uploads/${v.id}/stop`, { method: 'POST' }).catch(() => { });
       } else if (typeof v.droneIndex === 'number') {
         stopDroneProcessing(v.droneIndex);
       }

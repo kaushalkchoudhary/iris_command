@@ -1874,4 +1874,56 @@ def run_control_server(start_source_fn, start_upload_fn, initial_overlays):
     logging.getLogger("uvicorn.error").addFilter(_ShutdownNoiseFilter())
 
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=9010)
+    import copy
+    import threading
+    import time
+
+    # --- Access Log Filtering ---
+    class AccessLogFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            if record.args and len(record.args) >= 5:
+                status_code = record.args[4]
+                path = record.args[2]
+                
+                if status_code == 200:
+                    if "/api/health" in path or "/api/metrics" in path:
+                        return False
+                    if "/api/sam/result/" in path or "/api/sam/status" in path:
+                         return False
+                    if "/api/uploads" in path:
+                         return False
+            return True
+
+
+    # --- Periodic Status Logger ---
+    def _status_logger_worker():
+        while True:
+            time.sleep(15)
+            try:
+                # Count resources
+                with source_lock:
+                    n_rtsp = len(running_sources)
+                with upload_sources_lock:
+                    n_upload = sum(1 for u in upload_sources.values() if u.get("started_processing"))
+                n_sam = len(sam_threads)
+                
+                print(f"[SYSTEM] Status: OK | RTSP Streams: {n_rtsp} | Uploads: {n_upload} | SAM Workers: {n_sam}")
+            except Exception:
+                pass
+
+    threading.Thread(target=_status_logger_worker, daemon=True).start()
+
+    # Define standard Uvicorn log config
+    log_config = uvicorn.config.LOGGING_CONFIG.copy()
+    
+    # Add our filter to the configuration
+    log_config["filters"] = log_config.get("filters", {})
+    log_config["filters"]["access_filter"] = {
+        "()": lambda: AccessLogFilter()
+    }
+    
+    # Apply filter to access logger
+    log_config["loggers"]["uvicorn.access"]["filters"] = ["access_filter"]
+
+    # Run with explicit log_config
+    uvicorn.run(app, host="0.0.0.0", port=9010, log_config=log_config)
