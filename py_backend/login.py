@@ -11,8 +11,9 @@ DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 _SEED_USERS = [
     ("admin", "admin123"),
     ("commandcentre", "command@2024"),
-    ("command_admin", "iris_admin#2024"),
+    ("trafficcontrol", "traffic123"),
 ]
+_ALLOWED_USERNAMES = {u for u, _ in _SEED_USERS}
 
 
 def _hash_password(password: str) -> str:
@@ -57,16 +58,28 @@ def init_db():
     )
     """)
 
-    # Seed default users if table is empty
-    cur.execute("SELECT COUNT(*) FROM users")
-    if cur.fetchone()[0] == 0:
-        now = int(time.time())
-        for uname, pwd in _SEED_USERS:
+    # Keep auth users constrained to the allowed list.
+    now = int(time.time())
+    allowed_usernames = {u for u, _ in _SEED_USERS}
+
+    # Remove any user not in the allowed list (e.g., legacy defaults).
+    cur.execute("DELETE FROM users WHERE username NOT IN ({})".format(",".join("?" * len(allowed_usernames))), tuple(allowed_usernames))
+
+    # Ensure all allowed users exist with expected passwords.
+    for uname, pwd in _SEED_USERS:
+        cur.execute("SELECT id FROM users WHERE username = ?", (uname,))
+        row = cur.fetchone()
+        hashed = _hash_password(pwd)
+        if row is None:
             cur.execute(
                 "INSERT INTO users (username, password, created) VALUES (?, ?, ?)",
-                (uname, _hash_password(pwd), now),
+                (uname, hashed, now),
             )
-        print(f"[AUTH] Seeded {len(_SEED_USERS)} default users")
+        else:
+            cur.execute(
+                "UPDATE users SET password = ? WHERE username = ?",
+                (hashed, uname),
+            )
 
     conn.commit()
     conn.close()
@@ -87,6 +100,10 @@ def log_login(username: str, success: bool):
 
 def login_user(username: str, password: str) -> dict:
     """Validate credentials against the users table."""
+    if username not in _ALLOWED_USERNAMES:
+        log_login(username, False)
+        return {"success": False, "error": "Invalid credentials"}
+
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("SELECT password FROM users WHERE username = ?", (username,))
@@ -103,6 +120,9 @@ def login_user(username: str, password: str) -> dict:
 
 def add_user(username: str, password: str) -> dict:
     """Add a new user. Returns success/error."""
+    if username not in _ALLOWED_USERNAMES:
+        return {"success": False, "error": "Username is not allowed"}
+
     conn = _get_conn()
     cur = conn.cursor()
     try:
@@ -120,6 +140,9 @@ def add_user(username: str, password: str) -> dict:
 
 def delete_user(username: str) -> dict:
     """Delete a user by username."""
+    if username not in _ALLOWED_USERNAMES:
+        return {"success": False, "error": "Username is not allowed"}
+
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("DELETE FROM users WHERE username = ?", (username,))
@@ -133,6 +156,9 @@ def delete_user(username: str) -> dict:
 
 def change_password(username: str, new_password: str) -> dict:
     """Update a user's password."""
+    if username not in _ALLOWED_USERNAMES:
+        return {"success": False, "error": "Username is not allowed"}
+
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute(
